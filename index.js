@@ -76,6 +76,9 @@ const fetchAllVariants = async () => {
 };
 
 app.post("/tag-variants", async (req, res) => {
+  res.json({ status: "processing" }); // 👈 Respond immediately to Flow
+
+  // 👇 The tagging work runs in the background
   console.log("🔔 Triggered full variant tagging run...");
 
   const variant_ids = await fetchAllVariants();
