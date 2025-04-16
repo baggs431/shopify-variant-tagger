@@ -100,6 +100,12 @@ if (tag === currentTag) {
   continue;
 }
 
+// If there's no tag to apply, skip entirely (Shopify won't accept blank values)
+if (!tag) {
+  console.log(`⚠️ No tag to apply for ${variant.id} – skipping (Shopify doesn't accept empty values)`);
+  continue;
+}
+
 console.log(`➡️ Updating tag for ${variant.id} to "${tag || '[cleared]'}"`);
 
 // GraphQL mutation
