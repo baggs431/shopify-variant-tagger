@@ -7,10 +7,8 @@ app.use(express.json());
 const SHOPIFY_STORE = "uk-escentual.myshopify.com";
 const ADMIN_API_TOKEN = process.env.ADMIN_API_TOKEN;
 
-// Delay helper
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// Fetch all variants using cursor-based pagination with retries
 const fetchAllVariants = async () => {
   let hasNextPage = true;
   let cursor = null;
@@ -18,21 +16,19 @@ const fetchAllVariants = async () => {
   const MAX_RETRIES = 3;
 
   while (hasNextPage) {
-    const query = `
-      {
-        productVariants(first: 100${cursor ? `, after: "${cursor}"` : ""}) {
-          edges {
-            cursor
-            node {
-              id
-            }
-          }
-          pageInfo {
-            hasNextPage
+    const query = `{
+      productVariants(first: 100${cursor ? `, after: \"${cursor}\"` : ""}) {
+        edges {
+          cursor
+          node {
+            id
           }
         }
+        pageInfo {
+          hasNextPage
+        }
       }
-    `;
+    }`;
 
     let attempt = 0;
     let result;
@@ -50,7 +46,7 @@ const fetchAllVariants = async () => {
 
         result = await response.json();
         if (result.errors) throw new Error(JSON.stringify(result.errors));
-        break; // success
+        break;
       } catch (error) {
         attempt++;
         console.warn(`⚠️ Retry ${attempt} failed: ${error.message}`);
@@ -73,13 +69,12 @@ const fetchAllVariants = async () => {
     }
 
     console.log(`📦 Fetched ${allVariants.length} variants so far...`);
-    await delay(1000); // throttle
+    await delay(1000);
   }
 
   return allVariants;
 };
 
-// Route to tag variants
 app.post("/tag-variants", async (req, res) => {
   console.log("🔔 Triggered full variant tagging run...");
 
@@ -89,27 +84,28 @@ app.post("/tag-variants", async (req, res) => {
 
   for (const variantId of variant_ids) {
     try {
-      const query = `
-        {
-          productVariant(id: "${variantId}") {
-            id
+      const query = `{
+        productVariant(id: \"${variantId}\") {
+          id
+          createdAt
+          price
+          compareAtPrice
+          product {
             createdAt
-            price
-            compareAtPrice
-            product {
-              createdAt
-            }
-            metafields(namespace: "espresso", first: 10) {
-              edges {
-                node {
-                  key
-                  value
-                }
+          }
+          metafields(namespace: \"espresso\", first: 10) {
+            edges {
+              node {
+                key
+                value
               }
             }
           }
+          metafield(namespace: \"custom\", key: \"tag\") {
+            value
+          }
         }
-      `;
+      }`;
 
       const response = await fetch(`https://${SHOPIFY_STORE}/admin/api/2023-10/graphql.json`, {
         method: "POST",
@@ -137,42 +133,41 @@ app.post("/tag-variants", async (req, res) => {
         espressoMeta[edge.node.key] = edge.node.value;
       }
 
-      const dailySold = parseInt(espressoMeta.daily_sold_quantity || "0", 10);
       const isBestSeller = espressoMeta.best_selling_30_days === "true";
-      const currentTag = espressoMeta.tag || "";
+      const currentTag = variant.metafield?.value || "";
 
-      // Determine the new tag
       let tag = "";
-      if (createdAt > productCreated && now - createdAt < msIn45Days) {
+      const isNew = createdAt > productCreated && now - createdAt < msIn45Days;
+      const isOffer = !isNaN(price) && !isNaN(compareAt) && compareAt > price && Math.abs(compareAt - price) > 0.01;
+
+      if (isNew) {
         tag = "New";
-      } else if (compareAt > price) {
+      } else if (isOffer) {
         tag = "Offer";
       } else if (isBestSeller) {
         tag = "Hot";
       }
 
-      // Skip if tag is unchanged
       if (tag === currentTag) {
-        console.log(`⚠️ Tag for ${variant.id} already "${tag}" – skipping`);
+        console.log(`⚠️ Tag for ${variant.id} already \"${tag}\" – skipping`);
         continue;
       }
 
-      // Skip if there's no tag to apply
       if (!tag) {
         console.log(`⚠️ No tag to apply for ${variant.id} – skipping`);
         continue;
       }
 
-      console.log(`➡️ Tagging variant ${variant.id} as "${tag}"`);
+      console.log(`➡️ Tagging variant ${variant.id} as \"${tag}\"`);
 
       const mutation = `
         mutation {
           metafieldsSet(metafields: [{
-            ownerId: "${variant.id}",
-            namespace: "custom",
-            key: "tag",
-            type: "single_line_text_field",
-            value: "${tag}"
+            ownerId: \"${variant.id}\",
+            namespace: \"custom\",
+            key: \"tag\",
+            type: \"single_line_text_field\",
+            value: \"${tag}\"
           }]) {
             metafields {
               key
@@ -198,8 +193,7 @@ app.post("/tag-variants", async (req, res) => {
       const tagResult = await tagRes.json();
       console.log("🛠 Shopify response:", JSON.stringify(tagResult, null, 2));
 
-      await delay(1000); // throttle
-
+      await delay(1000);
     } catch (err) {
       console.error(`❌ Error tagging variant ${variantId}:`, err.message);
     }
