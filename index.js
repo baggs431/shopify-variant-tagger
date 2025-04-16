@@ -156,10 +156,47 @@ app.post("/tag-variants", async (req, res) => {
         continue;
       }
 
-      if (!tag) {
-        console.log(`⚠️ No tag to apply for ${variant.id} – skipping`);
-        continue;
+  if (!tag) {
+  if (currentTag) {
+    console.log(`🧹 Clearing tag for ${variant.id} (no longer qualifies)`);
+
+    const clearMutation = `
+      mutation {
+        metafieldsSet(metafields: [{
+          ownerId: "${variant.id}",
+          namespace: "custom",
+          key: "tag",
+          type: "single_line_text_field",
+          value: ""
+        }]) {
+          metafields {
+            key
+            value
+          }
+          userErrors {
+            field
+            message
+          }
+        }
       }
+    `;
+
+    await fetch(`https://${SHOPIFY_STORE}/admin/api/2023-10/graphql.json`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Shopify-Access-Token": ADMIN_API_TOKEN,
+      },
+      body: JSON.stringify({ query: clearMutation }),
+    });
+
+    await delay(1000); // 🕐 Stay chill
+  } else {
+    console.log(`⚠️ No tag to apply and nothing to clear for ${variant.id} – skipping`);
+  }
+
+  continue;
+}
 
       console.log(`➡️ Tagging variant ${variant.id} as \"${tag}\"`);
 
