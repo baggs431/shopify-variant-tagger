@@ -44,11 +44,58 @@ const getVariantAndProduct = async (variantId) => {
   const result = await response.json();
   return result.data.productVariant;
 };
+const fetchAllVariants = async () => {
+  let hasNextPage = true;
+  let cursor = null;
+  const allVariants = [];
 
+  while (hasNextPage) {
+    const query = `
+      {
+        productVariants(first: 100${cursor ? `, after: "${cursor}"` : ""}) {
+          edges {
+            cursor
+            node {
+              id
+            }
+          }
+          pageInfo {
+            hasNextPage
+          }
+        }
+      }
+    `;
+
+    const response = await fetch(`https://${SHOPIFY_STORE}/admin/api/2023-10/graphql.json`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Shopify-Access-Token": ADMIN_API_TOKEN,
+      },
+      body: JSON.stringify({ query }),
+    });
+
+    const result = await response.json();
+
+    const edges = result.data.productVariants.edges;
+    for (const edge of edges) {
+      allVariants.push(edge.node.id);
+    }
+
+    hasNextPage = result.data.productVariants.pageInfo.hasNextPage;
+    if (hasNextPage) {
+      cursor = edges[edges.length - 1].cursor;
+    }
+
+    console.log(`📦 Fetched ${allVariants.length} variants so far...`);
+  }
+
+  return allVariants;
+};
 app.post("/tag-variants", async (req, res) => {
   console.log("🔔 Request received:", JSON.stringify(req.body, null, 2));
 
-  const { variant_ids } = req.body;
+const variant_ids = await fetchAllVariants();
   const now = new Date();
   const msIn45Days = 45 * 24 * 60 * 60 * 1000;
 
