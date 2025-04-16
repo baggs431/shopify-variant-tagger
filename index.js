@@ -85,29 +85,44 @@ app.post("/tag-variants", async (req, res) => {
         tag = "Hot";
       }
 
-      console.log(`➡️ Tag for variant ${variant.id}: "${tag || '[cleared]'}"`);
+      // Extract existing tag value
+let currentTag = "";
+for (const edge of variant.metafields.edges) {
+  if (edge.node.key === "tag") {
+    currentTag = edge.node.value;
+    break;
+  }
+}
 
-      // GraphQL mutation
-      const mutation = `
-        mutation {
-          metafieldsSet(metafields: [{
-            ownerId: "${variant.id}",
-            namespace: "custom",
-            key: "tag",
-            type: "single_line_text_field",
-            value: "${tag}"
-          }]) {
-            metafields {
-              key
-              value
-            }
-            userErrors {
-              field
-              message
-            }
-          }
-        }
-      `;
+// If tag is already correct, skip
+if (tag === currentTag) {
+  console.log(`⚠️ Tag for ${variant.id} already "${tag}" – skipping update`);
+  continue;
+}
+
+console.log(`➡️ Updating tag for ${variant.id} to "${tag || '[cleared]'}"`);
+
+// GraphQL mutation
+const mutation = `
+  mutation {
+    metafieldsSet(metafields: [{
+      ownerId: "${variant.id}",
+      namespace: "custom",
+      key: "tag",
+      type: "single_line_text_field",
+      value: "${tag}"
+    }]) {
+      metafields {
+        key
+        value
+      }
+      userErrors {
+        field
+        message
+      }
+    }
+  }
+`;
 
       const tagRes = await fetch(`https://${SHOPIFY_STORE}/admin/api/2023-10/graphql.json`, {
         method: "POST",
