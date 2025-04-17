@@ -8,12 +8,13 @@ const SHOPIFY_STORE = "uk-escentual.myshopify.com";
 const ADMIN_API_TOKEN = process.env.ADMIN_API_TOKEN;
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const MAX_RETRIES = 3;
 
+// Fetch all variants using cursor-based pagination with retries
 const fetchAllVariants = async () => {
   let hasNextPage = true;
   let cursor = null;
   const allVariants = [];
-  const MAX_RETRIES = 3;
 
   while (hasNextPage) {
     const query = `{
@@ -76,9 +77,6 @@ const fetchAllVariants = async () => {
 };
 
 app.post("/tag-variants", async (req, res) => {
-  res.json({ status: "processing" }); // 👈 Respond immediately to Flow
-
-  // 👇 The tagging work runs in the background
   console.log("🔔 Triggered full variant tagging run...");
 
   const variant_ids = await fetchAllVariants();
@@ -140,12 +138,9 @@ app.post("/tag-variants", async (req, res) => {
       const currentTag = variant.metafield?.value || "";
 
       let tag = "";
-      const isNew = createdAt > productCreated && now - createdAt < msIn45Days;
-      const isOffer = !isNaN(price) && !isNaN(compareAt) && compareAt > price && Math.abs(compareAt - price) > 0.01;
-
-      if (isNew) {
+      if (createdAt > productCreated && now - createdAt < msIn45Days) {
         tag = "New";
-      } else if (isOffer) {
+      } else if (compareAt > 0 && compareAt > price) {
         tag = "Offer";
       } else if (isBestSeller) {
         tag = "Hot";
@@ -156,87 +151,51 @@ app.post("/tag-variants", async (req, res) => {
         continue;
       }
 
-if (!tag) {
-  if (currentTag) {
-    console.log(`🧹 Clearing tag for ${variant.id} (no longer qualifies)`);
+      if (!tag) {
+        if (currentTag) {
+          console.log(`🧹 Clearing tag for ${variant.id} (no longer qualifies)`);
 
-    const clearMutation = `
-      mutation {
-        metafieldsSet(metafields: [{
-          ownerId: "${variant.id}",
-          namespace: "custom",
-          key: "tag",
-          type: "single_line_text_field",
-          value: ""
-        }]) {
-          metafields {
-            key
-            value
+          const clearMutation = `
+            mutation {
+              metafieldsSet(metafields: [{
+                ownerId: \"${variant.id}\",
+                namespace: \"custom\",
+                key: \"tag\",
+                type: \"single_line_text_field\",
+                value: ""
+              }]) {
+                metafields {
+                  key
+                  value
+                }
+                userErrors {
+                  field
+                  message
+                }
+              }
+            }
+          `;
+
+          try {
+            const clearRes = await fetch(`https://${SHOPIFY_STORE}/admin/api/2023-10/graphql.json`, {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                "X-Shopify-Access-Token": ADMIN_API_TOKEN,
+              },
+              body: JSON.stringify({ query: clearMutation }),
+            });
+
+            const clearResult = await clearRes.json();
+            console.log("🧼 Clear response:", JSON.stringify(clearResult, null, 2));
+          } catch (err) {
+            console.error(`❌ Error clearing tag for ${variant.id}:`, err.message);
           }
-          userErrors {
-            field
-            message
-          }
+        } else {
+          console.log(`⚠️ No tag to apply for ${variant.id} – already empty`);
         }
+        continue;
       }
-    `;
-
-    const clearRes = await fetch(`https://${SHOPIFY_STORE}/admin/api/2023-10/graphql.json`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Shopify-Access-Token": ADMIN_API_TOKEN,
-      },
-      body: JSON.stringify({ query: clearMutation }),
-    });
-
-    const clearResult = await clearRes.json();
-    console.log("🧼 Clear response:", JSON.stringify(clearResult, null, 2));
-  } else {
-    console.log(`⚠️ No tag to apply for ${variant.id} – already empty`);
-  }
-  continue;
-}
-
-    const clearMutation = `
-      mutation {
-        metafieldsSet(metafields: [{
-          ownerId: "${variant.id}",
-          namespace: "custom",
-          key: "tag",
-          type: "single_line_text_field",
-          value: ""
-        }]) {
-          metafields {
-            key
-            value
-          }
-          userErrors {
-            field
-            message
-          }
-        }
-      }
-    `;
-
-    await fetch(`https://${SHOPIFY_STORE}/admin/api/2023-10/graphql.json`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Shopify-Access-Token": ADMIN_API_TOKEN,
-      },
-      body: JSON.stringify({ query: clearMutation }),
-    });
-
-    await delay(1000); // 🕐 Stay chill
-  } else {
-    console.log(`⚠️ No tag to apply and nothing to clear for ${variant.id} – skipping`);
-  }
-
-  continue;
-}
-
-      console.log(`➡️ Tagging variant ${variant.id} as \"${tag}\"`);
 
       const mutation = `
         mutation {
@@ -259,17 +218,27 @@ if (!tag) {
         }
       `;
 
-      const tagRes = await fetch(`https://${SHOPIFY_STORE}/admin/api/2023-10/graphql.json`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Shopify-Access-Token": ADMIN_API_TOKEN,
-        },
-        body: JSON.stringify({ query: mutation }),
-      });
+      let attempt = 0;
+      while (attempt < MAX_RETRIES) {
+        try {
+          const tagRes = await fetch(`https://${SHOPIFY_STORE}/admin/api/2023-10/graphql.json`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "X-Shopify-Access-Token": ADMIN_API_TOKEN,
+            },
+            body: JSON.stringify({ query: mutation }),
+          });
 
-      const tagResult = await tagRes.json();
-      console.log("🛠 Shopify response:", JSON.stringify(tagResult, null, 2));
+          const tagResult = await tagRes.json();
+          console.log("🛠 Shopify response:", JSON.stringify(tagResult, null, 2));
+          break;
+        } catch (err) {
+          attempt++;
+          console.warn(`⚠️ Retry tagging ${variant.id} (attempt ${attempt}): ${err.message}`);
+          await delay(1000);
+        }
+      }
 
       await delay(1000);
     } catch (err) {
