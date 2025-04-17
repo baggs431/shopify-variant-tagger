@@ -10,7 +10,6 @@ const ADMIN_API_TOKEN = process.env.ADMIN_API_TOKEN;
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const MAX_RETRIES = 3;
 
-// Fetch all variants using cursor-based pagination with retries
 const fetchAllVariants = async () => {
   let hasNextPage = true;
   let cursor = null;
@@ -151,49 +150,46 @@ app.post("/tag-variants", async (req, res) => {
         continue;
       }
 
-      if (!tag) {
-        if (currentTag) {
-          console.log(`🧹 Clearing tag for ${variant.id} (no longer qualifies)`);
+      if (!tag && currentTag) {
+        console.log(`🧹 Deleting tag metafield for ${variant.id} (no longer qualifies)`);
 
-          const clearMutation = `
-            mutation {
-              metafieldsSet(metafields: [{
-                ownerId: \"${variant.id}\",
-                namespace: \"custom\",
-                key: \"tag\",
-                type: \"single_line_text_field\",
-                value: ""
-              }]) {
-                metafields {
-                  key
-                  value
-                }
-                userErrors {
-                  field
-                  message
-                }
+        const deleteMutation = `
+          mutation {
+            metafieldDelete(input: {
+              ownerId: \"${variant.id}\",
+              namespace: \"custom\",
+              key: \"tag\"
+            }) {
+              deletedMetafieldId
+              userErrors {
+                field
+                message
               }
             }
-          `;
-
-          try {
-            const clearRes = await fetch(`https://${SHOPIFY_STORE}/admin/api/2023-10/graphql.json`, {
-              method: "POST",
-              headers: {
-                "Content-Type": "application/json",
-                "X-Shopify-Access-Token": ADMIN_API_TOKEN,
-              },
-              body: JSON.stringify({ query: clearMutation }),
-            });
-
-            const clearResult = await clearRes.json();
-            console.log("🧼 Clear response:", JSON.stringify(clearResult, null, 2));
-          } catch (err) {
-            console.error(`❌ Error clearing tag for ${variant.id}:`, err.message);
           }
-        } else {
-          console.log(`⚠️ No tag to apply for ${variant.id} – already empty`);
+        `;
+
+        try {
+          const clearRes = await fetch(`https://${SHOPIFY_STORE}/admin/api/2023-10/graphql.json`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              "X-Shopify-Access-Token": ADMIN_API_TOKEN,
+            },
+            body: JSON.stringify({ query: deleteMutation }),
+          });
+
+          const clearResult = await clearRes.json();
+          console.log("🧼 Delete response:", JSON.stringify(clearResult, null, 2));
+        } catch (err) {
+          console.error(`❌ Error deleting metafield for ${variant.id}:`, err.message);
         }
+
+        continue;
+      }
+
+      if (!tag && !currentTag) {
+        console.log(`⚠️ No tag to apply for ${variant.id} – already empty`);
         continue;
       }
 
