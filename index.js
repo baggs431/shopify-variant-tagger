@@ -136,7 +136,7 @@ app.post("/tag-variants", async (req, res) => {
       const isBestSeller = espressoMeta.best_selling_30_days === "true";
       const currentTag = variant.metafield?.value || "";
 
-      let tag = "";
+      let tag = "None";
       if (createdAt > productCreated && now - createdAt < msIn45Days) {
         tag = "New";
       } else if (compareAt > 0 && compareAt > price) {
@@ -147,49 +147,6 @@ app.post("/tag-variants", async (req, res) => {
 
       if (tag === currentTag) {
         console.log(`⚠️ Tag for ${variant.id} already \"${tag}\" – skipping`);
-        continue;
-      }
-
-      if (!tag && currentTag) {
-        console.log(`🧹 Deleting tag metafield for ${variant.id} (no longer qualifies)`);
-
-        const deleteMutation = `
-          mutation {
-            metafieldDelete(input: {
-              ownerId: \"${variant.id}\",
-              namespace: \"custom\",
-              key: \"tag\"
-            }) {
-              deletedMetafieldId
-              userErrors {
-                field
-                message
-              }
-            }
-          }
-        `;
-
-        try {
-          const clearRes = await fetch(`https://${SHOPIFY_STORE}/admin/api/2023-10/graphql.json`, {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              "X-Shopify-Access-Token": ADMIN_API_TOKEN,
-            },
-            body: JSON.stringify({ query: deleteMutation }),
-          });
-
-          const clearResult = await clearRes.json();
-          console.log("🧼 Delete response:", JSON.stringify(clearResult, null, 2));
-        } catch (err) {
-          console.error(`❌ Error deleting metafield for ${variant.id}:`, err.message);
-        }
-
-        continue;
-      }
-
-      if (!tag && !currentTag) {
-        console.log(`⚠️ No tag to apply for ${variant.id} – already empty`);
         continue;
       }
 
