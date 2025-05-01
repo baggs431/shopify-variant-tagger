@@ -9,6 +9,7 @@ const ADMIN_API_TOKEN = process.env.ADMIN_API_TOKEN;
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const MAX_RETRIES = 3;
+const BATCH_SIZE = 200;
 
 const fetchAllVariants = async () => {
   let hasNextPage = true;
@@ -75,10 +76,7 @@ const fetchAllVariants = async () => {
   return allVariants;
 };
 
-app.post("/tag-variants", async (req, res) => {
-  console.log("🔔 Triggered full variant tagging run...");
-
-  const variant_ids = await fetchAllVariants();
+const processVariants = async (variant_ids) => {
   const now = new Date();
   const msIn45Days = 45 * 24 * 60 * 60 * 1000;
 
@@ -197,6 +195,17 @@ app.post("/tag-variants", async (req, res) => {
     } catch (err) {
       console.error(`❌ Error tagging variant ${variantId}:`, err.message);
     }
+  }
+};
+
+app.post("/tag-variants", async (req, res) => {
+  console.log("🔔 Triggered full variant tagging run...");
+  const variant_ids = await fetchAllVariants();
+
+  for (let i = 0; i < variant_ids.length; i += BATCH_SIZE) {
+    const batch = variant_ids.slice(i, i + BATCH_SIZE);
+    console.log(`🚀 Processing batch ${i / BATCH_SIZE + 1}: ${batch.length} variants`);
+    await processVariants(batch);
   }
 
   res.json({ status: "done" });
