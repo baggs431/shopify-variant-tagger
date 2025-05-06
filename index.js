@@ -12,7 +12,6 @@ const MAX_RETRIES = 3;
 const PROCESS_INTERVAL_MS = 5000;
 const BATCH_SIZE = 10;
 
-// In-memory async queue for variant IDs
 let variantQueue = [];
 
 const processVariants = async (variant_ids) => {
@@ -29,6 +28,7 @@ const processVariants = async (variant_ids) => {
           compareAtPrice
           product {
             createdAt
+            status
           }
           metafields(namespace: \"espresso\", first: 10) {
             edges {
@@ -57,6 +57,11 @@ const processVariants = async (variant_ids) => {
       const variant = result.data.productVariant;
       if (!variant) {
         console.warn(`⚠️ Variant ${variantId} not found`);
+        continue;
+      }
+
+      if (variant.product.status !== "ACTIVE") {
+        console.log(`⚠️ Skipping ${variantId} — product is ${variant.product.status}`);
         continue;
       }
 
@@ -137,7 +142,6 @@ const processVariants = async (variant_ids) => {
   }
 };
 
-// New async-friendly endpoint
 app.post("/enqueue-tag-variants", async (req, res) => {
   const variant_ids = req.body.variant_ids || [];
   if (!Array.isArray(variant_ids)) {
@@ -149,10 +153,8 @@ app.post("/enqueue-tag-variants", async (req, res) => {
   res.status(200).json({ status: "queued", count: variant_ids.length });
 });
 
-// Background async processor
 setInterval(async () => {
   if (variantQueue.length === 0) return;
-
   const batch = variantQueue.splice(0, BATCH_SIZE);
   console.log(`🔄 Processing ${batch.length} variants...`);
   await processVariants(batch);
