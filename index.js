@@ -9,72 +9,11 @@ const ADMIN_API_TOKEN = process.env.ADMIN_API_TOKEN;
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const MAX_RETRIES = 3;
-const BATCH_SIZE = 200;
+const PROCESS_INTERVAL_MS = 5000;
+const BATCH_SIZE = 10;
 
-const fetchAllVariants = async () => {
-  let hasNextPage = true;
-  let cursor = null;
-  const allVariants = [];
-
-  while (hasNextPage) {
-    const query = `{
-      productVariants(first: 100${cursor ? `, after: \"${cursor}\"` : ""}) {
-        edges {
-          cursor
-          node {
-            id
-          }
-        }
-        pageInfo {
-          hasNextPage
-        }
-      }
-    }`;
-
-    let attempt = 0;
-    let result;
-
-    while (attempt < MAX_RETRIES) {
-      try {
-        const response = await fetch(`https://${SHOPIFY_STORE}/admin/api/2023-10/graphql.json`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "X-Shopify-Access-Token": ADMIN_API_TOKEN,
-          },
-          body: JSON.stringify({ query }),
-        });
-
-        result = await response.json();
-        if (result.errors) throw new Error(JSON.stringify(result.errors));
-        break;
-      } catch (error) {
-        attempt++;
-        console.warn(`⚠️ Retry ${attempt} failed: ${error.message}`);
-        await delay(1000);
-        if (attempt >= MAX_RETRIES) {
-          console.error("❌ Max retries reached. Aborting.");
-          return allVariants;
-        }
-      }
-    }
-
-    const edges = result.data.productVariants.edges;
-    for (const edge of edges) {
-      allVariants.push(edge.node.id);
-    }
-
-    hasNextPage = result.data.productVariants.pageInfo.hasNextPage;
-    if (hasNextPage) {
-      cursor = edges[edges.length - 1].cursor;
-    }
-
-    console.log(`📦 Fetched ${allVariants.length} variants so far...`);
-    await delay(1000);
-  }
-
-  return allVariants;
-};
+// In-memory async queue for variant IDs
+let variantQueue = [];
 
 const processVariants = async (variant_ids) => {
   const now = new Date();
@@ -193,24 +132,32 @@ const processVariants = async (variant_ids) => {
 
       await delay(1000);
     } catch (err) {
-      console.error(`❌ Error tagging variant ${variantId}:`, err.message);
+      console.error(`❌ Error tagging variant ${variantId}:`, err.stack || err.message);
     }
   }
 };
 
-app.post("/tag-variants", async (req, res) => {
-  console.log("🔔 Triggered full variant tagging run...");
-  const variant_ids = await fetchAllVariants();
-
-  for (let i = 0; i < variant_ids.length; i += BATCH_SIZE) {
-    const batch = variant_ids.slice(i, i + BATCH_SIZE);
-    console.log(`🚀 Processing batch ${i / BATCH_SIZE + 1}: ${batch.length} variants`);
-    await processVariants(batch);
+// New async-friendly endpoint
+app.post("/enqueue-tag-variants", async (req, res) => {
+  const variant_ids = req.body.variant_ids || [];
+  if (!Array.isArray(variant_ids)) {
+    return res.status(400).json({ error: "Expected array of variant_ids" });
   }
 
-  res.json({ status: "done" });
+  variantQueue.push(...variant_ids);
+  console.log(`🧾 Enqueued ${variant_ids.length} variants. Queue now has ${variantQueue.length}.`);
+  res.status(200).json({ status: "queued", count: variant_ids.length });
 });
 
+// Background async processor
+setInterval(async () => {
+  if (variantQueue.length === 0) return;
+
+  const batch = variantQueue.splice(0, BATCH_SIZE);
+  console.log(`🔄 Processing ${batch.length} variants...`);
+  await processVariants(batch);
+}, PROCESS_INTERVAL_MS);
+
 app.listen(3000, () => {
-  console.log("🔥 Variant tagger running at http://localhost:3000");
+  console.log("🔥 Async variant tagger ready at http://localhost:3000");
 });
