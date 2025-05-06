@@ -14,6 +14,57 @@ const BATCH_SIZE = 10;
 
 let variantQueue = [];
 
+// Paginated fetch of all variants
+const fetchAllVariants = async () => {
+  let hasNextPage = true;
+  let cursor = null;
+  const allVariants = [];
+
+  while (hasNextPage) {
+    const query = `{
+      productVariants(first: 100${cursor ? ", after: \"" + cursor + "\"" : ""}) {
+        edges {
+          cursor
+          node {
+            id
+          }
+        }
+        pageInfo {
+          hasNextPage
+        }
+      }
+    }`;
+
+    try {
+      const response = await fetch(`https://${SHOPIFY_STORE}/admin/api/2023-10/graphql.json`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Shopify-Access-Token": ADMIN_API_TOKEN,
+        },
+        body: JSON.stringify({ query }),
+      });
+
+      const result = await response.json();
+      const edges = result.data.productVariants.edges;
+      edges.forEach(edge => allVariants.push(edge.node.id));
+
+      hasNextPage = result.data.productVariants.pageInfo.hasNextPage;
+      if (hasNextPage) {
+        cursor = edges[edges.length - 1].cursor;
+      }
+
+      console.log(`📦 Collected ${allVariants.length} variant IDs so far...`);
+      await delay(500);
+    } catch (err) {
+      console.error("❌ Failed to fetch variants:", err.stack || err.message);
+      break;
+    }
+  }
+
+  return allVariants;
+};
+
 const processVariants = async (variant_ids) => {
   const now = new Date();
   const msIn45Days = 45 * 24 * 60 * 60 * 1000;
@@ -142,10 +193,17 @@ const processVariants = async (variant_ids) => {
   }
 };
 
+// Enhanced: Accepts variant_ids or fetches all if empty
 app.post("/enqueue-tag-variants", async (req, res) => {
-  const variant_ids = req.body.variant_ids || [];
+  let variant_ids = req.body.variant_ids || [];
+
   if (!Array.isArray(variant_ids)) {
     return res.status(400).json({ error: "Expected array of variant_ids" });
+  }
+
+  if (variant_ids.length === 0) {
+    console.log("🔁 No variant_ids passed — fetching all variants...");
+    variant_ids = await fetchAllVariants();
   }
 
   variantQueue.push(...variant_ids);
