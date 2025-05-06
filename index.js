@@ -47,6 +47,7 @@ const getVariantAndProduct = async (variantId) => {
   return result.data.productVariant;
 };
 
+// Primary tagging route
 app.post("/tag-variants", async (req, res) => {
   const variantIds = req.body.variant_ids || [];
   const now = new Date();
@@ -137,6 +138,31 @@ app.post("/tag-variants", async (req, res) => {
   }
 
   res.json({ status: "done", processed: variantIds.length });
+});
+
+// Triggerable batching endpoint
+app.post("/enqueue-tag-variants", async (req, res) => {
+  console.log("🛎️ Enqueue route hit");
+
+  // Example test variant IDs (replace with live data or logic)
+  const variantIds = [
+    "gid://shopify/ProductVariant/1234567890",
+    "gid://shopify/ProductVariant/0987654321"
+  ];
+
+  // Internally call the tagging route
+  const response = await fetch("http://localhost:3000/tag-variants", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ variant_ids: variantIds })
+  });
+
+  const result = await response.json();
+  console.log("✅ Tagging result from enqueue:", result);
+
+  res.json({ status: "queued", result });
 });
 
 app.listen(3000, () => {
