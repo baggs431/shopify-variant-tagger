@@ -9,10 +9,10 @@ const ADMIN_API_TOKEN = process.env.ADMIN_API_TOKEN;
 const SHOPIFY_WEBHOOK_SECRET = process.env.SHOPIFY_WEBHOOK_SECRET;
 const delay = (ms) => new Promise((res) => setTimeout(res, ms));
 
-// 🚨 Ensure raw body parsing comes first for webhook route
+// 🚨 Must use raw body for HMAC verification
 app.use("/webhook", bodyParser.raw({ type: "application/json", limit: "5mb" }));
 
-// 🧪 Improved HMAC verification with logging
+// 🔐 HMAC validation
 function verifyHmac(req) {
   const hmacHeader = req.get("X-Shopify-Hmac-Sha256");
   const digest = crypto
@@ -31,7 +31,12 @@ function verifyHmac(req) {
   return valid;
 }
 
-// 📥 Webhook Handler
+// 🔄 Encode GID to Base64 for GraphQL
+function encodeShopifyGid(gid) {
+  return Buffer.from(gid).toString("base64");
+}
+
+// 📦 Webhook handler
 app.post("/webhook", async (req, res) => {
   if (!verifyHmac(req)) {
     return res.status(401).send("Unauthorized");
@@ -60,10 +65,10 @@ app.post("/webhook", async (req, res) => {
   res.status(200).send("OK");
 });
 
-// ✨ JSON parsing for other routes
+// 🧠 Use JSON for all other routes
 app.use(express.json({ limit: "5mb" }));
 
-// 🏷️ Tag variants logic remains unchanged (omitted here for brevity)
+// 🏷️ Tag variants logic
 app.post("/tag-variants", async (req, res) => {
   const { variant_ids } = req.body;
   const now = new Date();
@@ -71,8 +76,10 @@ app.post("/tag-variants", async (req, res) => {
 
   for (const variantId of variant_ids) {
     try {
+      const encodedId = encodeShopifyGid(variantId);
+
       const query = `{
-        productVariant(id: "${variantId}") {
+        productVariant(id: "${encodedId}") {
           id
           createdAt
           price
@@ -142,7 +149,7 @@ app.post("/tag-variants", async (req, res) => {
       const mutation = `
         mutation {
           metafieldsSet(metafields: [{
-            ownerId: "${variantId}",
+            ownerId: "${encodedId}",
             namespace: "custom",
             key: "tag",
             type: "single_line_text_field",
@@ -172,6 +179,8 @@ app.post("/tag-variants", async (req, res) => {
   res.json({ status: "done", processed: variant_ids.length });
 });
 
-app.listen(3000, () => {
-  console.log("🚀 Variant tagging server running on port 3000");
+// 🛠 Use dynamic port for Render
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`🚀 Variant tagging server running on port ${PORT}`);
 });
