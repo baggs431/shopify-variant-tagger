@@ -9,13 +9,10 @@ const ADMIN_API_TOKEN = process.env.ADMIN_API_TOKEN;
 const SHOPIFY_WEBHOOK_SECRET = process.env.SHOPIFY_WEBHOOK_SECRET;
 const delay = (ms) => new Promise((res) => setTimeout(res, ms));
 
-// 🧠 Capture raw body as Buffer
-app.use(
-  "/webhook",
-  bodyParser.raw({ type: "application/json", limit: "5mb" }) // increase size limit
-);
+// 🚨 Ensure raw body parsing comes first for webhook route
+app.use("/webhook", bodyParser.raw({ type: "application/json", limit: "5mb" }));
 
-// 🧪 HMAC check (now using raw body)
+// 🧪 Improved HMAC verification with logging
 function verifyHmac(req) {
   const hmacHeader = req.get("X-Shopify-Hmac-Sha256");
   const digest = crypto
@@ -23,21 +20,36 @@ function verifyHmac(req) {
     .update(req.body)
     .digest("base64");
 
-  return digest === hmacHeader;
+  const valid = digest === hmacHeader;
+
+  if (!valid) {
+    console.warn(`❌ HMAC mismatch:
+    ➡️ Received: ${hmacHeader}
+    🔑 Calculated: ${digest}`);
+  }
+
+  return valid;
 }
 
+// 📥 Webhook Handler
 app.post("/webhook", async (req, res) => {
   if (!verifyHmac(req)) {
-    console.warn("❌ Webhook HMAC validation failed");
     return res.status(401).send("Unauthorized");
   }
 
-  const payload = JSON.parse(req.body.toString("utf8"));
+  let payload;
+  try {
+    payload = JSON.parse(req.body.toString("utf8"));
+  } catch (error) {
+    console.error("❌ Payload parsing failed", error);
+    return res.status(400).send("Invalid payload");
+  }
+
   const variantIds = (payload.variants || []).map(
     (v) => `gid://shopify/ProductVariant/${v.id}`
   );
 
-  console.log("📦 Webhook received. Forwarding to /tag-variants:", variantIds);
+  console.log("📦 Webhook received, sending to /tag-variants:", variantIds);
 
   await fetch("http://localhost:3000/tag-variants", {
     method: "POST",
@@ -48,9 +60,10 @@ app.post("/webhook", async (req, res) => {
   res.status(200).send("OK");
 });
 
-// ✨ JSON parser for everything else
+// ✨ JSON parsing for other routes
 app.use(express.json({ limit: "5mb" }));
 
+// 🏷️ Tag variants logic remains unchanged (omitted here for brevity)
 app.post("/tag-variants", async (req, res) => {
   const { variant_ids } = req.body;
   const now = new Date();
@@ -74,14 +87,17 @@ app.post("/tag-variants", async (req, res) => {
         }
       }`;
 
-      const response = await fetch(`https://${SHOPIFY_STORE}/admin/api/2023-10/graphql.json`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Shopify-Access-Token": ADMIN_API_TOKEN,
-        },
-        body: JSON.stringify({ query }),
-      });
+      const response = await fetch(
+        `https://${SHOPIFY_STORE}/admin/api/2023-10/graphql.json`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Shopify-Access-Token": ADMIN_API_TOKEN,
+          },
+          body: JSON.stringify({ query }),
+        }
+      );
 
       const result = await response.json();
       const variant = result?.data?.productVariant;
@@ -97,12 +113,12 @@ app.post("/tag-variants", async (req, res) => {
 
       const espressoMeta = {};
       const customMeta = {};
-      for (const edge of variant.metafields.espresso.edges) {
+      variant.metafields.espresso.edges.forEach((edge) => {
         espressoMeta[edge.node.key] = edge.node.value;
-      }
-      for (const edge of variant.metafields.custom.edges) {
+      });
+      variant.metafields.custom.edges.forEach((edge) => {
         customMeta[edge.node.key] = edge.node.value;
-      }
+      });
 
       const isBestSeller = espressoMeta.best_selling_30_days === "true";
       const currentTag = customMeta.tag || "";
@@ -157,5 +173,5 @@ app.post("/tag-variants", async (req, res) => {
 });
 
 app.listen(3000, () => {
-  console.log("🔥 Variant tagger running at http://localhost:3000");
+  console.log("🚀 Variant tagging server running on port 3000");
 });
