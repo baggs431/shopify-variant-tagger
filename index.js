@@ -4,59 +4,42 @@ import crypto from "crypto";
 import bodyParser from "body-parser";
 
 const app = express();
-const SHOPIFY_WEBHOOK_SECRET = process.env.SHOPIFY_WEBHOOK_SECRET;
+
+// Apply raw body parser only to webhook route
+app.use('/webhook', bodyParser.raw({ type: 'application/json' }));
+// Apply normal JSON parser to all other routes
+app.use(bodyParser.json({ limit: '5mb' }));
+
 const SHOPIFY_STORE = "uk-escentual.myshopify.com";
 const ADMIN_API_TOKEN = process.env.ADMIN_API_TOKEN;
+const WEBHOOK_SECRET = process.env.SHOPIFY_WEBHOOK_SECRET;
 
-// Utility: Pause between requests
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// --- Webhook HMAC verification ---
-const verifyHmac = (req, res, buf) => {
+// Verify webhook HMAC
+function verifyHmac(req) {
   const hmacHeader = req.get("X-Shopify-Hmac-Sha256");
   const digest = crypto
-    .createHmac("sha256", SHOPIFY_WEBHOOK_SECRET)
-    .update(buf)
+    .createHmac("sha256", WEBHOOK_SECRET)
+    .update(req.body, 'utf8')
     .digest("base64");
+  return digest === hmacHeader;
+}
 
-  if (digest !== hmacHeader) {
+// Webhook endpoint
+app.post("/webhook", (req, res) => {
+  if (!verifyHmac(req)) {
     console.warn("⚠️ Webhook HMAC validation failed");
-    return false;
+    return res.status(401).send("HMAC validation failed");
   }
-  return true;
-};
 
-// Webhook route with raw body parsing
-app.post(
-  "/webhook",
-  bodyParser.raw({ type: "application/json", limit: "1mb" }),
-  async (req, res) => {
-    if (!verifyHmac(req, res, req.body)) return res.status(401).send("Invalid HMAC");
+  const payload = JSON.parse(req.body.toString('utf8'));
+  console.log("✅ Webhook payload parsed:", payload.id || JSON.stringify(payload));
+  // You can trigger your tagging logic here if needed
+  res.sendStatus(200);
+});
 
-    const rawBody = req.body.toString("utf8");
-    const payload = JSON.parse(rawBody);
-
-    console.log("✅ Webhook verified: Product ID", payload.id);
-
-    // Extract variant IDs if present
-    const variantIds = (payload.variants || []).map((v) => `gid://shopify/ProductVariant/${v.id}`);
-
-    if (variantIds.length) {
-      const tagResponse = await fetch("http://localhost:3000/tag-variants", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ variant_ids: variantIds }),
-      });
-      console.log("📦 Tag response status:", tagResponse.status);
-    }
-
-    res.status(200).send("OK");
-  }
-);
-
-// --- Tagging logic ---
-app.use(bodyParser.json({ limit: "5mb" }));
-
+// Main variant tagging endpoint
 app.post("/tag-variants", async (req, res) => {
   const { variant_ids } = req.body;
   console.log("📨 Tagging requested for:", variant_ids);
@@ -67,16 +50,16 @@ app.post("/tag-variants", async (req, res) => {
   for (const variantId of variant_ids) {
     try {
       const query = `{
-        productVariant(id: \"${variantId}\") {
+        productVariant(id: "${variantId}") {
           id
           createdAt
           price
           compareAtPrice
           product { createdAt }
-          metafields(namespace: \"custom\", first: 10) {
+          metafields(namespace: "custom", first: 10) {
             edges { node { key value } }
           }
-          metafields(namespace: \"espresso\", first: 10) {
+          metafields(namespace: "espresso", first: 10) {
             edges { node { key value } }
           }
         }
@@ -92,8 +75,9 @@ app.post("/tag-variants", async (req, res) => {
       });
 
       const result = await response.json();
+
       if (!result || !result.data || !result.data.productVariant) {
-        console.warn("❗ Missing productVariant for", variantId);
+        console.warn("❗ No productVariant in response:", JSON.stringify(result, null, 2));
         continue;
       }
 
@@ -106,32 +90,44 @@ app.post("/tag-variants", async (req, res) => {
       const espressoMeta = {};
       const customMeta = {};
 
-      variant.metafields[0]?.edges.forEach((e) => customMeta[e.node.key] = e.node.value);
-      variant.metafields[1]?.edges.forEach((e) => espressoMeta[e.node.key] = e.node.value);
+      for (const edge of variant.metafields) {
+        if (edge.namespace === "espresso") {
+          edge.edges.forEach(e => espressoMeta[e.node.key] = e.node.value);
+        }
+        if (edge.namespace === "custom") {
+          edge.edges.forEach(e => customMeta[e.node.key] = e.node.value);
+        }
+      }
 
       const isBestSeller = espressoMeta.best_selling_30_days === "true";
       const currentTag = customMeta.tag || "";
 
-      let newTag = "None";
-      if (createdAt > productCreated && now - createdAt < msIn45Days) newTag = "New";
-      else if (compareAt > price) newTag = "Offer";
-      else if (isBestSeller) newTag = "Hot";
+      let newTag = "";
+      if (createdAt > productCreated && now - createdAt < msIn45Days) {
+        newTag = "New";
+      } else if (compareAt > price) {
+        newTag = "Offer";
+      } else if (isBestSeller) {
+        newTag = "Hot";
+      } else {
+        newTag = "None";
+      }
 
       if (newTag === currentTag) {
-        console.log(`✅ Skipping ${variantId} — tag already '${newTag}'`);
+        console.log(`✅ Skipped: ${variantId} already tagged as "${newTag}"`);
         continue;
       }
 
-      console.log(`📝 Updating tag for ${variantId} → '${newTag}'`);
+      console.log(`🎯 Updating tag for ${variantId} → "${newTag}"`);
 
       const mutation = `
         mutation {
           metafieldsSet(metafields: [{
-            ownerId: \"${variantId}\",
-            namespace: \"custom\",
-            key: \"tag\",
-            type: \"single_line_text_field\",
-            value: \"${newTag}\"
+            ownerId: "${variantId}",
+            namespace: "custom",
+            key: "tag",
+            type: "single_line_text_field",
+            value: "${newTag}"
           }]) {
             metafields { key value }
             userErrors { field message }
@@ -149,7 +145,7 @@ app.post("/tag-variants", async (req, res) => {
 
       await delay(1000);
     } catch (err) {
-      console.error(`❌ Failed for ${variantId}:`, err.message);
+      console.error(`❌ Error tagging ${variantId}:`, err.message);
     }
   }
 
