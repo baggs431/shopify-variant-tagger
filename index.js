@@ -1,3 +1,14 @@
+import express from "express";
+import fetch from "node-fetch";
+
+const app = express();
+app.use(express.json());
+
+const SHOPIFY_STORE = "uk-escentual.myshopify.com";
+const ADMIN_API_TOKEN = process.env.ADMIN_API_TOKEN;
+
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
 // 🔁 Tagging endpoint
 app.post("/tag-variants", async (req, res) => {
   const { variant_ids } = req.body;
@@ -47,17 +58,18 @@ app.post("/tag-variants", async (req, res) => {
       const price = parseFloat(variant.price);
       const compareAt = parseFloat(variant.compareAtPrice || "0");
 
-      const meta = {};
-      for (const edge of variant.metafields.edges) {
-        meta[edge.node.key] = edge.node.value;
-      }
-      const espresso = {};
-      for (const edge of variant.metafields.namespace === "espresso" ? variant.metafields.edges : []) {
-        espresso[edge.node.key] = edge.node.value;
+      const customMeta = {};
+      for (const edge of variant.metafields.namespace === "custom" ? variant.metafields.edges : []) {
+        customMeta[edge.node.key] = edge.node.value;
       }
 
-      const isBestSeller = espresso.best_selling_30_days === "true";
-      const currentTag = meta.tag || "";
+      const espressoMeta = {};
+      for (const edge of variant.metafields.namespace === "espresso" ? variant.metafields.edges : []) {
+        espressoMeta[edge.node.key] = edge.node.value;
+      }
+
+      const isBestSeller = espressoMeta.best_selling_30_days === "true";
+      const currentTag = customMeta.tag || "";
 
       let newTag = "";
       if (createdAt > productCreated && now - createdAt < msIn45Days) {
@@ -102,9 +114,14 @@ app.post("/tag-variants", async (req, res) => {
 
       await delay(1000);
     } catch (err) {
-      console.error(`❌ Error tagging ${variantId}:", err.message);
+      console.error(`❌ Error tagging ${variantId}:`, err.message);
     }
   }
 
   res.json({ status: "done" });
+});
+
+// ✅ Start the server
+app.listen(3000, () => {
+  console.log("🔥 Variant tagger running at http://localhost:3000");
 });
