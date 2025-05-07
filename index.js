@@ -25,7 +25,11 @@ app.post("/webhook/product-update", bodyParser.raw({ type: "application/json", l
       .createHmac("sha256", SHOPIFY_WEBHOOK_SECRET)
       .update(rawBody, "utf8")
       .digest("base64");
+console.log("🔍 Shopify HMAC Header:", hmacHeader);
+console.log("🧪 Computed HMAC from body:", computedHmac);
 
+// Optional: log payload size
+console.log("📏 Raw body length:", Buffer.byteLength(rawBody, "utf8"));
     if (computedHmac !== hmacHeader) {
       console.warn("⚠️ Webhook HMAC validation failed");
       return res.status(401).send("Unauthorized");
