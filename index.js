@@ -1,47 +1,43 @@
-// index.js
 import express from "express";
 import fetch from "node-fetch";
 import crypto from "crypto";
 import bodyParser from "body-parser";
 
 const app = express();
-const SHOPIFY_SECRET = process.env.SHOPIFY_WEBHOOK_SECRET;
-const ADMIN_API_TOKEN = process.env.ADMIN_API_TOKEN;
 const SHOPIFY_STORE = "uk-escentual.myshopify.com";
+const ADMIN_API_TOKEN = process.env.ADMIN_API_TOKEN;
+const SHOPIFY_WEBHOOK_SECRET = process.env.SHOPIFY_WEBHOOK_SECRET;
 
-app.use(express.json({ limit: "5mb" }));
+const delay = (ms) => new Promise((res) => setTimeout(res, ms));
 
-const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+// Middleware: Parse raw body for HMAC verification
+app.use("/webhook", bodyParser.raw({ type: "application/json" }));
 
-// Verify Shopify HMAC
-const verifyHmac = (rawBody, hmacHeader) => {
-  const generatedHmac = crypto
-    .createHmac("sha256", SHOPIFY_SECRET)
-    .update(rawBody, "utf8")
+// HMAC verification
+function verifyHmac(req) {
+  const hmacHeader = req.get("X-Shopify-Hmac-Sha256");
+  const digest = crypto
+    .createHmac("sha256", SHOPIFY_WEBHOOK_SECRET)
+    .update(req.body, "utf8")
     .digest("base64");
+  return digest === hmacHeader;
+}
 
-  return generatedHmac === hmacHeader;
-};
-
-// Handle Shopify Webhook
-app.post("/webhook", bodyParser.raw({ type: "*/*" }), async (req, res) => {
-  const hmacHeader = req.headers["x-shopify-hmac-sha256"];
-  const rawBody = req.body;
-
-  if (!verifyHmac(rawBody, hmacHeader)) {
-    console.warn("⚠️ Webhook HMAC validation failed");
+// Shopify Webhook endpoint
+app.post("/webhook", async (req, res) => {
+  if (!verifyHmac(req)) {
+    console.warn("❌ Webhook HMAC validation failed");
     return res.status(401).send("Unauthorized");
   }
 
-  const body = JSON.parse(rawBody.toString("utf8"));
-  console.log("✅ Webhook payload parsed:", body.id || body.admin_graphql_api_id);
+  const payload = JSON.parse(req.body.toString("utf8"));
 
-  // Extract variant IDs from the product payload
-  const variantIds = body.variants?.map((v) => v.admin_graphql_api_id).filter(Boolean);
+  console.log("📦 Product Updated via Webhook");
+  const variants = payload.variants || [];
+  const variantIds = variants.map((v) => `gid://shopify/ProductVariant/${v.id}`);
 
-  if (!variantIds || variantIds.length === 0) {
-    console.log("⚠️ No variants to process");
-    return res.status(200).send("No variants");
+  if (variantIds.length === 0) {
+    return res.status(200).send("No variants to process");
   }
 
   console.log("🚀 Forwarding to /tag-variants:", variantIds);
@@ -52,28 +48,32 @@ app.post("/webhook", bodyParser.raw({ type: "*/*" }), async (req, res) => {
     body: JSON.stringify({ variant_ids: variantIds }),
   });
 
-  res.status(200).send("ok");
+  res.status(200).send("Webhook received");
 });
 
-// Tagging endpoint
+// Variant tagging logic
+app.use(express.json({ limit: "5mb" }));
+
 app.post("/tag-variants", async (req, res) => {
   const { variant_ids } = req.body;
-  console.log("📨 Tagging requested for:", variant_ids);
-
   const now = new Date();
   const msIn45Days = 45 * 24 * 60 * 60 * 1000;
 
   for (const variantId of variant_ids) {
     try {
       const query = `{
-        productVariant(id: \"${variantId}\") {
+        productVariant(id: "${variantId}") {
           id
           createdAt
           price
           compareAtPrice
           product { createdAt }
-          metafields(namespace: \"custom\", first: 10) { edges { node { key value } } }
-          metafields(namespace: \"espresso\", first: 10) { edges { node { key value } } }
+          metafields(namespace: "espresso", first: 10) {
+            edges { node { key value } }
+          }
+          metafields(namespace: "custom", first: 10) {
+            edges { node { key value } }
+          }
         }
       }`;
 
@@ -87,12 +87,12 @@ app.post("/tag-variants", async (req, res) => {
       });
 
       const result = await response.json();
-      if (!result?.data?.productVariant) {
-        console.warn("❗ No productVariant in response:", result);
+      const variant = result?.data?.productVariant;
+      if (!variant) {
+        console.warn(`⚠️ Variant not found: ${variantId}`);
         continue;
       }
 
-      const variant = result.data.productVariant;
       const createdAt = new Date(variant.createdAt);
       const productCreated = new Date(variant.product.createdAt);
       const price = parseFloat(variant.price);
@@ -111,28 +111,30 @@ app.post("/tag-variants", async (req, res) => {
       const isBestSeller = espressoMeta.best_selling_30_days === "true";
       const currentTag = customMeta.tag || "";
 
-      let newTag = "None";
+      let newTag = "";
       if (createdAt > productCreated && now - createdAt < msIn45Days) {
         newTag = "New";
       } else if (compareAt > price) {
         newTag = "Offer";
       } else if (isBestSeller) {
         newTag = "Hot";
+      } else {
+        newTag = "None";
       }
 
       if (newTag === currentTag) {
-        console.log(`✅ Skipped: ${variantId} already tagged as \"${newTag}\"`);
+        console.log(`✅ ${variantId} already tagged as "${newTag}"`);
         continue;
       }
 
       const mutation = `
         mutation {
           metafieldsSet(metafields: [{
-            ownerId: \"${variantId}\",
-            namespace: \"custom\",
-            key: \"tag\",
-            type: \"single_line_text_field\",
-            value: \"${newTag}\"
+            ownerId: "${variantId}",
+            namespace: "custom",
+            key: "tag",
+            type: "single_line_text_field",
+            value: "${newTag}"
           }]) {
             metafields { key value }
             userErrors { field message }
@@ -148,13 +150,14 @@ app.post("/tag-variants", async (req, res) => {
         body: JSON.stringify({ query: mutation }),
       });
 
+      console.log(`🏷️ Tagged ${variantId} as "${newTag}"`);
       await delay(1000);
     } catch (err) {
       console.error(`❌ Error tagging ${variantId}:`, err.message);
     }
   }
 
-  res.json({ status: "done" });
+  res.json({ status: "done", processed: variant_ids.length });
 });
 
 app.listen(3000, () => {
