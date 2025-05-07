@@ -189,3 +189,54 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 Variant tagging server running on port ${PORT}`);
 });
+
+app.get("/debug-variant/:id", async (req, res) => {
+  const variantId = req.params.id;
+  const encodedId = Buffer.from(`gid://shopify/ProductVariant/${variantId}`).toString("base64");
+
+  console.log(`🧪 Debugging variant: ${variantId}`);
+  console.log(`🧪 Encoded ID: ${encodedId}`);
+
+  const query = `{
+    productVariant(id: "${encodedId}") {
+      id
+      title
+      createdAt
+      price
+      compareAtPrice
+      product { title createdAt }
+    }
+  }`;
+
+  try {
+    const response = await fetch(`https://${SHOPIFY_STORE}/admin/api/2023-10/graphql.json`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Shopify-Access-Token": ADMIN_API_TOKEN,
+      },
+      body: JSON.stringify({ query }),
+    });
+
+    const text = await response.text();
+
+    try {
+      const result = JSON.parse(text);
+      res.json({
+        success: true,
+        raw: result,
+      });
+    } catch (err) {
+      res.status(500).json({
+        success: false,
+        error: "JSON parse error",
+        raw: text,
+      });
+    }
+  } catch (err) {
+    res.status(500).json({
+      success: false,
+      error: err.message,
+    });
+  }
+});
