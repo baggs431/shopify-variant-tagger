@@ -31,7 +31,7 @@ function verifyHmac(req) {
   return valid;
 }
 
-// Proper ID encoder
+// Variant ID encoding
 function encodeShopifyVariantId(id) {
   return Buffer.from(`gid://shopify/ProductVariant/${id}`).toString("base64");
 }
@@ -51,7 +51,7 @@ app.post("/webhook", async (req, res) => {
   }
 
   const variantIds = (payload.variants || []).map(
-    (v) => v.id.toString() // ✅ use raw ID, not a GID
+    (v) => v.id.toString()
   );
 
   console.log("📦 Webhook received, sending to /tag-variants:", variantIds);
@@ -98,23 +98,35 @@ app.post("/tag-variants", async (req, res) => {
         }
       }`;
 
-      const response = await fetch(
-        `https://${SHOPIFY_STORE}/admin/api/2023-10/graphql.json`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "X-Shopify-Access-Token": ADMIN_API_TOKEN,
-          },
-          body: JSON.stringify({ query }),
-        }
-      );
+      const response = await fetch(`https://${SHOPIFY_STORE}/admin/api/2023-10/graphql.json`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Shopify-Access-Token": ADMIN_API_TOKEN,
+        },
+        body: JSON.stringify({ query }),
+      });
 
-      const result = await response.json();
+      const text = await response.text();
+
+      let result;
+      try {
+        result = JSON.parse(text);
+      } catch (err) {
+        console.error(`❌ Failed to parse response for ${variantId}:`, err.message);
+        console.error("Raw response:", text);
+        continue;
+      }
+
+      if (result.errors) {
+        console.warn(`⚠️ Shopify returned GraphQL errors for ${variantId}:`, result.errors);
+        continue;
+      }
+
       const variant = result?.data?.productVariant;
-
       if (!variant) {
-        console.warn(`⚠️ Variant not found: ${variantId}`);
+        console.warn(`⚠️ Variant not found in response for ${variantId}`);
+        console.warn("📭 Full result:", JSON.stringify(result, null, 2));
         continue;
       }
 
@@ -184,31 +196,25 @@ app.post("/tag-variants", async (req, res) => {
   res.json({ status: "done", processed: variant_ids.length });
 });
 
-// Start server
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`🚀 Variant tagging server running on port ${PORT}`);
-});
-
+// 🔍 Debug route for live variant inspection
 app.get("/debug-variant/:id", async (req, res) => {
-  const variantId = req.params.id;
-  const encodedId = Buffer.from(`gid://shopify/ProductVariant/${variantId}`).toString("base64");
-
-  console.log(`🧪 Debugging variant: ${variantId}`);
-  console.log(`🧪 Encoded ID: ${encodedId}`);
-
-  const query = `{
-    productVariant(id: "${encodedId}") {
-      id
-      title
-      createdAt
-      price
-      compareAtPrice
-      product { title createdAt }
-    }
-  }`;
-
   try {
+    const variantId = req.params.id;
+    if (!variantId) return res.status(400).json({ error: "Missing variant ID" });
+
+    const encodedId = Buffer.from(`gid://shopify/ProductVariant/${variantId}`).toString("base64");
+
+    const query = `{
+      productVariant(id: "${encodedId}") {
+        id
+        title
+        createdAt
+        price
+        compareAtPrice
+        product { title createdAt }
+      }
+    }`;
+
     const response = await fetch(`https://${SHOPIFY_STORE}/admin/api/2023-10/graphql.json`, {
       method: "POST",
       headers: {
@@ -219,24 +225,25 @@ app.get("/debug-variant/:id", async (req, res) => {
     });
 
     const text = await response.text();
+    let result;
 
     try {
-      const result = JSON.parse(text);
-      res.json({
-        success: true,
-        raw: result,
-      });
-    } catch (err) {
-      res.status(500).json({
-        success: false,
-        error: "JSON parse error",
+      result = JSON.parse(text);
+    } catch {
+      return res.status(500).json({
+        error: "Invalid JSON response from Shopify",
         raw: text,
       });
     }
+
+    res.json({ success: true, variantId, result });
   } catch (err) {
-    res.status(500).json({
-      success: false,
-      error: err.message,
-    });
+    res.status(500).json({ error: "Server error", detail: err.message });
   }
+});
+
+// Launch server
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`🚀 Variant tagging server running on port ${PORT}`);
 });
