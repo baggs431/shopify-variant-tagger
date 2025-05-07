@@ -4,16 +4,16 @@ import crypto from "crypto";
 import bodyParser from "body-parser";
 
 const app = express();
-const SHOPIFY_STORE = "uk-escentual.myshopify.com";
+const SHOPIFY_STORE = process.env.SHOPIFY_STORE || "uk-escentual.myshopify.com";
 const ADMIN_API_TOKEN = process.env.ADMIN_API_TOKEN;
 const SHOPIFY_WEBHOOK_SECRET = process.env.SHOPIFY_WEBHOOK_SECRET;
 const BASE_URL = process.env.BASE_URL || "http://localhost:3000";
 const delay = (ms) => new Promise((res) => setTimeout(res, ms));
 
-// 🚨 Must use raw body for HMAC verification
+// 🔐 Use raw body for webhook verification
 app.use("/webhook", bodyParser.raw({ type: "application/json", limit: "5mb" }));
 
-// 🔐 HMAC validation
+// 🧠 HMAC verification
 function verifyHmac(req) {
   const hmacHeader = req.get("X-Shopify-Hmac-Sha256");
   const digest = crypto
@@ -32,9 +32,9 @@ function verifyHmac(req) {
   return valid;
 }
 
-// 🔄 Encode GID to Base64 for GraphQL
-function encodeShopifyGid(gid) {
-  return Buffer.from(gid).toString("base64");
+// 🔄 Proper Shopify variant ID encoder
+function encodeShopifyVariantId(id) {
+  return Buffer.from(`gid://shopify/ProductVariant/${id}`).toString("base64");
 }
 
 // 📦 Webhook handler
@@ -52,7 +52,7 @@ app.post("/webhook", async (req, res) => {
   }
 
   const variantIds = (payload.variants || []).map(
-    (v) => `gid://shopify/ProductVariant/${v.id}`
+    (v) => v.id.toString()
   );
 
   console.log("📦 Webhook received, sending to /tag-variants:", variantIds);
@@ -66,10 +66,10 @@ app.post("/webhook", async (req, res) => {
   res.status(200).send("OK");
 });
 
-// 🧠 Use JSON for all other routes
+// ✨ JSON for other routes
 app.use(express.json({ limit: "5mb" }));
 
-// 🏷️ Tag variants logic
+// 🏷️ Variant tagging handler
 app.post("/tag-variants", async (req, res) => {
   const { variant_ids } = req.body;
   const now = new Date();
@@ -77,7 +77,7 @@ app.post("/tag-variants", async (req, res) => {
 
   for (const variantId of variant_ids) {
     try {
-      const encodedId = encodeShopifyGid(variantId);
+      const encodedId = encodeShopifyVariantId(variantId);
 
       const query = `{
         productVariant(id: "${encodedId}") {
@@ -110,7 +110,7 @@ app.post("/tag-variants", async (req, res) => {
       const result = await response.json();
       const variant = result?.data?.productVariant;
       if (!variant) {
-        console.warn(`⚠️ Variant not found: ${variantId}`);
+        console.warn(`⚠️ Variant not found: gid://shopify/ProductVariant/${variantId}`);
         continue;
       }
 
@@ -180,7 +180,7 @@ app.post("/tag-variants", async (req, res) => {
   res.json({ status: "done", processed: variant_ids.length });
 });
 
-// 🌐 Dynamic port for Render
+// 🚀 Dynamic port for Render
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 Variant tagging server running on port ${PORT}`);
