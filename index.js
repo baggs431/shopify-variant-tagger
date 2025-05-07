@@ -7,6 +7,7 @@ const app = express();
 const SHOPIFY_STORE = "uk-escentual.myshopify.com";
 const ADMIN_API_TOKEN = process.env.ADMIN_API_TOKEN;
 const SHOPIFY_WEBHOOK_SECRET = process.env.SHOPIFY_WEBHOOK_SECRET;
+const BASE_URL = process.env.BASE_URL || "http://localhost:3000";
 const delay = (ms) => new Promise((res) => setTimeout(res, ms));
 
 // 🚨 Must use raw body for HMAC verification
@@ -56,7 +57,7 @@ app.post("/webhook", async (req, res) => {
 
   console.log("📦 Webhook received, sending to /tag-variants:", variantIds);
 
-  await fetch("http://localhost:3000/tag-variants", {
+  await fetch(`${BASE_URL}/tag-variants`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ variant_ids: variantIds }),
@@ -179,7 +180,7 @@ app.post("/tag-variants", async (req, res) => {
   res.json({ status: "done", processed: variant_ids.length });
 });
 
-// 🛠 Use dynamic port for Render
+// 🌐 Dynamic port for Render
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 Variant tagging server running on port ${PORT}`);
