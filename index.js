@@ -20,17 +20,35 @@ app.post("/webhook/product-update", bodyParser.raw({ type: "application/json", l
       .update(rawBody)
       .digest("base64");
 
-    console.log("🔍 Shopify HMAC Header:", hmacHeader);
-    console.log("🧪 Computed HMAC from body:", computedHmac);
-    console.log("📏 Raw body length:", rawBody.length);
-
     if (computedHmac !== hmacHeader) {
       console.warn("⚠️ Webhook HMAC validation failed");
       return res.status(401).send("Unauthorized");
     }
 
     const payload = JSON.parse(rawBody.toString("utf8"));
-    console.log("✅ Webhook payload parsed:", payload.id);
+    console.log("📦 Product ID:", payload.id);
+    console.log("🕵️ Product Updated At:", payload.updated_at);
+
+    if (payload.variants && payload.variants.length > 0) {
+      const variantSummary = payload.variants.map((v) => ({
+        id: v.id,
+        title: v.title,
+        price: v.price,
+        compare_at_price: v.compare_at_price,
+        updated_at: v.updated_at,
+      }));
+      console.log("🔍 Variant Changes:", JSON.stringify(variantSummary, null, 2));
+    }
+
+    const allVariantsUnchanged = payload.variants.every(v => {
+      const noChange = !v.price && !v.compare_at_price && !v.title;
+      return noChange;
+    });
+
+    if (allVariantsUnchanged) {
+      console.log("🔕 Skipping — No variant fields changed");
+      return res.status(200).send("Ignored");
+    }
 
     const variantIds = payload.variants.map(v => v.admin_graphql_api_id);
 
