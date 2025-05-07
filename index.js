@@ -4,42 +4,35 @@ import crypto from "crypto";
 import bodyParser from "body-parser";
 
 const app = express();
-
 const SHOPIFY_STORE = "uk-escentual.myshopify.com";
 const ADMIN_API_TOKEN = process.env.ADMIN_API_TOKEN;
 const SHOPIFY_WEBHOOK_SECRET = process.env.SHOPIFY_WEBHOOK_SECRET;
-
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// Increase payload limit for general routes
-app.use(bodyParser.json({ limit: "2mb" }));
-app.use(bodyParser.urlencoded({ extended: true }));
-
-// Webhook: Product update (captures variant changes)
+// ✅ Webhook BEFORE other body parsers
 app.post("/webhook/product-update", bodyParser.raw({ type: "application/json", limit: "2mb" }), async (req, res) => {
   try {
     const hmacHeader = req.get("X-Shopify-Hmac-Sha256");
-    const rawBody = req.body.toString("utf8");
+    const rawBody = req.body;
 
     const computedHmac = crypto
       .createHmac("sha256", SHOPIFY_WEBHOOK_SECRET)
-      .update(rawBody, "utf8")
+      .update(rawBody)
       .digest("base64");
-console.log("🔍 Shopify HMAC Header:", hmacHeader);
-console.log("🧪 Computed HMAC from body:", computedHmac);
 
-// Optional: log payload size
-console.log("📏 Raw body length:", Buffer.byteLength(rawBody, "utf8"));
+    console.log("🔍 Shopify HMAC Header:", hmacHeader);
+    console.log("🧪 Computed HMAC from body:", computedHmac);
+    console.log("📏 Raw body length:", rawBody.length);
+
     if (computedHmac !== hmacHeader) {
       console.warn("⚠️ Webhook HMAC validation failed");
       return res.status(401).send("Unauthorized");
     }
 
-    const payload = JSON.parse(rawBody);
-    const variantIds = payload.variants.map(v => v.admin_graphql_api_id);
+    const payload = JSON.parse(rawBody.toString("utf8"));
+    console.log("✅ Webhook payload parsed:", payload.id);
 
-    console.log("🔔 Webhook triggered for product update:", payload.id);
-    console.log("📦 Variant IDs:", variantIds);
+    const variantIds = payload.variants.map(v => v.admin_graphql_api_id);
 
     await fetch("http://localhost:3000/tag-variants", {
       method: "POST",
@@ -54,7 +47,11 @@ console.log("📏 Raw body length:", Buffer.byteLength(rawBody, "utf8"));
   }
 });
 
-// Webhook registration (on startup)
+// ✅ Use other middleware AFTER webhook
+app.use(bodyParser.json({ limit: "2mb" }));
+app.use(bodyParser.urlencoded({ extended: true }));
+
+// Webhook registration
 const registerWebhook = async () => {
   const query = `
     mutation {
