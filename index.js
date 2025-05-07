@@ -7,23 +7,25 @@ const app = express();
 const SHOPIFY_STORE = "uk-escentual.myshopify.com";
 const ADMIN_API_TOKEN = process.env.ADMIN_API_TOKEN;
 const SHOPIFY_WEBHOOK_SECRET = process.env.SHOPIFY_WEBHOOK_SECRET;
-
 const delay = (ms) => new Promise((res) => setTimeout(res, ms));
 
-// Middleware: Parse raw body for HMAC verification
-app.use("/webhook", bodyParser.raw({ type: "application/json" }));
+// 🧠 Capture raw body as Buffer
+app.use(
+  "/webhook",
+  bodyParser.raw({ type: "application/json", limit: "5mb" }) // increase size limit
+);
 
-// HMAC verification
+// 🧪 HMAC check (now using raw body)
 function verifyHmac(req) {
   const hmacHeader = req.get("X-Shopify-Hmac-Sha256");
   const digest = crypto
     .createHmac("sha256", SHOPIFY_WEBHOOK_SECRET)
-    .update(req.body, "utf8")
+    .update(req.body)
     .digest("base64");
+
   return digest === hmacHeader;
 }
 
-// Shopify Webhook endpoint
 app.post("/webhook", async (req, res) => {
   if (!verifyHmac(req)) {
     console.warn("❌ Webhook HMAC validation failed");
@@ -31,16 +33,11 @@ app.post("/webhook", async (req, res) => {
   }
 
   const payload = JSON.parse(req.body.toString("utf8"));
+  const variantIds = (payload.variants || []).map(
+    (v) => `gid://shopify/ProductVariant/${v.id}`
+  );
 
-  console.log("📦 Product Updated via Webhook");
-  const variants = payload.variants || [];
-  const variantIds = variants.map((v) => `gid://shopify/ProductVariant/${v.id}`);
-
-  if (variantIds.length === 0) {
-    return res.status(200).send("No variants to process");
-  }
-
-  console.log("🚀 Forwarding to /tag-variants:", variantIds);
+  console.log("📦 Webhook received. Forwarding to /tag-variants:", variantIds);
 
   await fetch("http://localhost:3000/tag-variants", {
     method: "POST",
@@ -48,10 +45,10 @@ app.post("/webhook", async (req, res) => {
     body: JSON.stringify({ variant_ids: variantIds }),
   });
 
-  res.status(200).send("Webhook received");
+  res.status(200).send("OK");
 });
 
-// Variant tagging logic
+// ✨ JSON parser for everything else
 app.use(express.json({ limit: "5mb" }));
 
 app.post("/tag-variants", async (req, res) => {
@@ -100,7 +97,6 @@ app.post("/tag-variants", async (req, res) => {
 
       const espressoMeta = {};
       const customMeta = {};
-
       for (const edge of variant.metafields.espresso.edges) {
         espressoMeta[edge.node.key] = edge.node.value;
       }
