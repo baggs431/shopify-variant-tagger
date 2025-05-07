@@ -1,56 +1,57 @@
 import express from "express";
 import fetch from "node-fetch";
 import crypto from "crypto";
+import getRawBody from "raw-body";
 
 const app = express();
+
 const SHOPIFY_STORE = "uk-escentual.myshopify.com";
 const ADMIN_API_TOKEN = process.env.ADMIN_API_TOKEN;
 const SHOPIFY_WEBHOOK_SECRET = process.env.SHOPIFY_WEBHOOK_SECRET;
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// Middleware: Use raw body for webhook, JSON elsewhere
-app.use((req, res, next) => {
-  if (req.originalUrl === "/webhook") {
-    express.raw({ type: "application/json" })(req, res, next);
-  } else {
-    express.json({ limit: "5mb" })(req, res, next);
+// Webhook endpoint with raw-body validation
+app.post("/webhook", async (req, res) => {
+  try {
+    const hmacHeader = req.get("X-Shopify-Hmac-Sha256");
+    const rawBody = await getRawBody(req);
+
+    const generatedHmac = crypto
+      .createHmac("sha256", SHOPIFY_WEBHOOK_SECRET)
+      .update(rawBody)
+      .digest("base64");
+
+    if (generatedHmac !== hmacHeader) {
+      console.warn("⚠️ Webhook HMAC validation failed");
+      return res.status(401).send("Unauthorized - HMAC failed");
+    }
+
+    const body = JSON.parse(rawBody.toString("utf8"));
+    const productId = body.id;
+    console.log("✅ Webhook payload parsed:", productId);
+
+    const variantIds = body.variants.map((v) => v.admin_graphql_api_id);
+    console.log("🚀 Forwarding to tag-variants:", variantIds);
+
+    const response = await fetch("http://localhost:3000/tag-variants", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ variant_ids: variantIds }),
+    });
+
+    const result = await response.json();
+    console.log("✅ Tagging result from webhook:", result);
+    res.status(200).send("ok");
+  } catch (err) {
+    console.error("❌ Webhook processing failed:", err.message);
+    res.status(500).send("Internal error");
   }
 });
 
-// Webhook endpoint from Shopify → forwards to tag-variants
-app.post("/webhook", (req, res) => {
-  const hmacHeader = req.get("X-Shopify-Hmac-Sha256");
-  const rawBody = req.body;
+// Keep this separate JSON middleware for tag-variants
+app.use(express.json({ limit: '5mb' }));
 
-  const digest = crypto
-    .createHmac("sha256", SHOPIFY_WEBHOOK_SECRET)
-    .update(rawBody, "utf8")
-    .digest("base64");
-
-  if (digest !== hmacHeader) {
-    console.warn("⚠️ Webhook HMAC validation failed");
-    return res.status(401).send("HMAC validation failed");
-  }
-
-  const body = JSON.parse(rawBody.toString("utf8"));
-  const updatedVariants = body.variants || [];
-  const variantIds = updatedVariants.map(
-    (v) => `gid://shopify/ProductVariant/${v.id}`
-  );
-
-  console.log("📦 Product webhook triggered → forwarding variants:", variantIds);
-
-  fetch("http://localhost:3000/tag-variants", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ variant_ids: variantIds }),
-  });
-
-  res.status(200).send("OK");
-});
-
-// Tagging logic
 app.post("/tag-variants", async (req, res) => {
   const { variant_ids } = req.body;
   console.log("📨 Tagging requested for:", variant_ids);
@@ -76,22 +77,19 @@ app.post("/tag-variants", async (req, res) => {
         }
       }`;
 
-      const response = await fetch(
-        `https://${SHOPIFY_STORE}/admin/api/2023-10/graphql.json`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "X-Shopify-Access-Token": ADMIN_API_TOKEN,
-          },
-          body: JSON.stringify({ query }),
-        }
-      );
+      const response = await fetch(`https://${SHOPIFY_STORE}/admin/api/2023-10/graphql.json`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Shopify-Access-Token": ADMIN_API_TOKEN,
+        },
+        body: JSON.stringify({ query }),
+      });
 
       const result = await response.json();
 
-      if (!result?.data?.productVariant) {
-        console.warn(`❌ Missing productVariant for ${variantId}`);
+      if (!result || !result.data || !result.data.productVariant) {
+        console.warn("❗ No productVariant in response:", JSON.stringify(result, null, 2));
         continue;
       }
 
@@ -105,9 +103,12 @@ app.post("/tag-variants", async (req, res) => {
       const customMeta = {};
 
       for (const edge of variant.metafields) {
-        const ns = edge.node?.namespace;
-        if (ns === "espresso") espressoMeta[edge.node.key] = edge.node.value;
-        if (ns === "custom") customMeta[edge.node.key] = edge.node.value;
+        if (edge.namespace === "espresso") {
+          edge.edges.forEach(e => espressoMeta[e.node.key] = e.node.value);
+        }
+        if (edge.namespace === "custom") {
+          edge.edges.forEach(e => customMeta[e.node.key] = e.node.value);
+        }
       }
 
       const isBestSeller = espressoMeta.best_selling_30_days === "true";
@@ -125,40 +126,38 @@ app.post("/tag-variants", async (req, res) => {
       }
 
       if (newTag === currentTag) {
-        console.log(`✅ Skipped ${variantId}: already "${newTag}"`);
+        console.log(`✅ Skipped: ${variantId} already tagged as \"${newTag}\"`);
         continue;
       }
 
-      console.log(`🔄 Updating tag for ${variantId} → "${newTag}"`);
+      console.log(`🎯 Updating tag for ${variantId} → \"${newTag}\"`);
 
-      const mutation = `mutation {
-        metafieldsSet(metafields: [{
-          ownerId: "${variantId}",
-          namespace: "custom",
-          key: "tag",
-          type: "single_line_text_field",
-          value: "${newTag}"
-        }]) {
-          metafields { key value }
-          userErrors { field message }
-        }
-      }`;
+      const mutation = `
+        mutation {
+          metafieldsSet(metafields: [{
+            ownerId: \"${variantId}\",
+            namespace: \"custom\",
+            key: \"tag\",
+            type: \"single_line_text_field\",
+            value: \"${newTag}\"
+          }]) {
+            metafields { key value }
+            userErrors { field message }
+          }
+        }`;
 
-      await fetch(
-        `https://${SHOPIFY_STORE}/admin/api/2023-10/graphql.json`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "X-Shopify-Access-Token": ADMIN_API_TOKEN,
-          },
-          body: JSON.stringify({ query: mutation }),
-        }
-      );
+      await fetch(`https://${SHOPIFY_STORE}/admin/api/2023-10/graphql.json`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Shopify-Access-Token": ADMIN_API_TOKEN,
+        },
+        body: JSON.stringify({ query: mutation }),
+      });
 
       await delay(1000);
     } catch (err) {
-      console.error(`❌ Error tagging ${variantId}:`, err.message);
+      console.error(`❌ Error tagging ${variantId}:", err.message);
     }
   }
 
