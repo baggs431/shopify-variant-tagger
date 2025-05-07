@@ -9,11 +9,10 @@ const SHOPIFY_STORE = "uk-escentual.myshopify.com";
 const ADMIN_API_TOKEN = process.env.ADMIN_API_TOKEN;
 const SHOPIFY_WEBHOOK_SECRET = process.env.SHOPIFY_WEBHOOK_SECRET;
 
-// Delay helper to throttle requests
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// Webhook handler for new product variants
-app.post("/webhook/product-variant-create", express.raw({ type: "application/json" }), async (req, res) => {
+// Webhook handler for product update (e.g. variant added or price changed)
+app.post("/webhook/product-update", express.raw({ type: "application/json" }), async (req, res) => {
   try {
     const hmac = req.get("X-Shopify-Hmac-Sha256");
     const body = req.body.toString();
@@ -28,14 +27,47 @@ app.post("/webhook/product-variant-create", express.raw({ type: "application/jso
     }
 
     const payload = JSON.parse(body);
-    const variantId = payload.id;
+    const productId = payload.id;
 
-    console.log("🔔 Webhook triggered for variant:", variantId);
+    console.log("🔔 Webhook triggered for product update:", productId);
+
+    // Get all variant IDs for the product
+    const query = `
+      {
+        product(id: "gid://shopify/Product/${productId}") {
+          variants(first: 100) {
+            edges {
+              node {
+                id
+              }
+            }
+          }
+        }
+      }
+    `;
+
+    const variantRes = await fetch(`https://${SHOPIFY_STORE}/admin/api/2023-10/graphql.json`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Shopify-Access-Token": ADMIN_API_TOKEN,
+      },
+      body: JSON.stringify({ query })
+    });
+
+    const variantData = await variantRes.json();
+    const variantEdges = variantData.data?.product?.variants?.edges || [];
+    const variantIds = variantEdges.map(edge => edge.node.id);
+
+    if (variantIds.length === 0) {
+      console.log("⚠️ No variants found for product", productId);
+      return res.status(200).send("No variants to process");
+    }
 
     await fetch("http://localhost:3000/tag-variants", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ variant_ids: [`gid://shopify/ProductVariant/${variantId}`] })
+      body: JSON.stringify({ variant_ids: variantIds })
     });
 
     res.status(200).send("OK");
@@ -45,14 +77,14 @@ app.post("/webhook/product-variant-create", express.raw({ type: "application/jso
   }
 });
 
-// Function to register webhook on app start
+// Register the webhook for product updates
 const registerWebhook = async () => {
-  const webhookUrl = "https://shopify-variant-tagger.onrender.com/webhook/product-variant-create";
+  const webhookUrl = "https://shopify-variant-tagger.onrender.com/webhook/product-update";
 
   const query = `
     mutation {
       webhookSubscriptionCreate(
-        topic: PRODUCT_VARIANTS_CREATE,
+        topic: PRODUCTS_UPDATE,
         webhookSubscription: {
           callbackUrl: "${webhookUrl}",
           format: JSON
