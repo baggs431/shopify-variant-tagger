@@ -1,15 +1,15 @@
 import express from "express";
 import fetch from "node-fetch";
+import crypto from "crypto";
 
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: '5mb' }));
 
 const SHOPIFY_STORE = "uk-escentual.myshopify.com";
 const ADMIN_API_TOKEN = process.env.ADMIN_API_TOKEN;
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// 🔁 Tagging endpoint
 app.post("/tag-variants", async (req, res) => {
   const { variant_ids } = req.body;
   console.log("📨 Tagging requested for:", variant_ids);
@@ -20,16 +20,16 @@ app.post("/tag-variants", async (req, res) => {
   for (const variantId of variant_ids) {
     try {
       const query = `{
-        productVariant(id: "${variantId}") {
+        productVariant(id: \"${variantId}\") {
           id
           createdAt
           price
           compareAtPrice
           product { createdAt }
-          metafields(namespace: "custom", first: 10) {
+          metafields(namespace: \"custom\", first: 10) {
             edges { node { key value } }
           }
-          metafields(namespace: "espresso", first: 10) {
+          metafields(namespace: \"espresso\", first: 10) {
             edges { node { key value } }
           }
         }
@@ -46,7 +46,6 @@ app.post("/tag-variants", async (req, res) => {
 
       const result = await response.json();
 
-      // ✅ Debug logging for missing variant
       if (!result || !result.data || !result.data.productVariant) {
         console.warn("❗ No productVariant in response:", JSON.stringify(result, null, 2));
         continue;
@@ -58,14 +57,16 @@ app.post("/tag-variants", async (req, res) => {
       const price = parseFloat(variant.price);
       const compareAt = parseFloat(variant.compareAtPrice || "0");
 
-      const customMeta = {};
-      for (const edge of variant.metafields.namespace === "custom" ? variant.metafields.edges : []) {
-        customMeta[edge.node.key] = edge.node.value;
-      }
-
       const espressoMeta = {};
-      for (const edge of variant.metafields.namespace === "espresso" ? variant.metafields.edges : []) {
-        espressoMeta[edge.node.key] = edge.node.value;
+      const customMeta = {};
+
+      for (const edge of variant.metafields) {
+        if (edge.namespace === "espresso") {
+          edge.edges.forEach(e => espressoMeta[e.node.key] = e.node.value);
+        }
+        if (edge.namespace === "custom") {
+          edge.edges.forEach(e => customMeta[e.node.key] = e.node.value);
+        }
       }
 
       const isBestSeller = espressoMeta.best_selling_30_days === "true";
@@ -83,20 +84,20 @@ app.post("/tag-variants", async (req, res) => {
       }
 
       if (newTag === currentTag) {
-        console.log(`✅ Skipped: ${variantId} already tagged as "${newTag}"`);
+        console.log(`✅ Skipped: ${variantId} already tagged as \"${newTag}\"`);
         continue;
       }
 
-      console.log(`🎯 Updating tag for ${variantId} → "${newTag}"`);
+      console.log(`🎯 Updating tag for ${variantId} → \"${newTag}\"`);
 
       const mutation = `
         mutation {
           metafieldsSet(metafields: [{
-            ownerId: "${variantId}",
-            namespace: "custom",
-            key: "tag",
-            type: "single_line_text_field",
-            value: "${newTag}"
+            ownerId: \"${variantId}\",
+            namespace: \"custom\",
+            key: \"tag\",
+            type: \"single_line_text_field\",
+            value: \"${newTag}\"
           }]) {
             metafields { key value }
             userErrors { field message }
@@ -121,7 +122,6 @@ app.post("/tag-variants", async (req, res) => {
   res.json({ status: "done" });
 });
 
-// ✅ Start the server
 app.listen(3000, () => {
   console.log("🔥 Variant tagger running at http://localhost:3000");
 });
