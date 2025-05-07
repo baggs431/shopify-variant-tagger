@@ -35,18 +35,23 @@ app.post("/webhook/product-update", bodyParser.raw({ type: "application/json", l
         title: v.title,
         price: v.price,
         compare_at_price: v.compare_at_price,
+        created_at: v.created_at,
         updated_at: v.updated_at,
       }));
       console.log("🔍 Variant Changes:", JSON.stringify(variantSummary, null, 2));
     }
 
+    const now = new Date();
+    const msIn45Days = 45 * 24 * 60 * 60 * 1000;
+
     const allVariantsUnchanged = payload.variants.every(v => {
-      const noChange = !v.price && !v.compare_at_price && !v.title;
-      return noChange;
+      const isNew = v.created_at && (now - new Date(v.created_at)) < msIn45Days;
+      const noMeaningfulChange = !v.price && !v.compare_at_price && !v.title;
+      return noMeaningfulChange && !isNew;
     });
 
     if (allVariantsUnchanged) {
-      console.log("🔕 Skipping — No variant fields changed");
+      console.log("🔕 Skipping — No meaningful changes and no new variants");
       return res.status(200).send("Ignored");
     }
 
