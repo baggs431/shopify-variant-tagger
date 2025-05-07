@@ -10,6 +10,9 @@ const SHOPIFY_WEBHOOK_SECRET = process.env.SHOPIFY_WEBHOOK_SECRET;
 const BASE_URL = process.env.BASE_URL || "http://localhost:3000";
 const delay = (ms) => new Promise((res) => setTimeout(res, ms));
 
+// 🧠 Temporarily stores recently processed variant IDs
+const recentlyTagged = new Set();
+
 app.use("/webhook", bodyParser.raw({ type: "application/json", limit: "5mb" }));
 
 function verifyHmac(req) {
@@ -19,15 +22,7 @@ function verifyHmac(req) {
     .update(req.body)
     .digest("base64");
 
-  const valid = digest === hmacHeader;
-
-  if (!valid) {
-    console.warn(`❌ HMAC mismatch:
-    ➡️ Received: ${hmacHeader}
-    🔑 Calculated: ${digest}`);
-  }
-
-  return valid;
+  return digest === hmacHeader;
 }
 
 function encodeShopifyVariantId(id) {
@@ -36,6 +31,7 @@ function encodeShopifyVariantId(id) {
 
 app.post("/webhook", async (req, res) => {
   if (!verifyHmac(req)) {
+    console.warn("❌ Webhook HMAC validation failed");
     return res.status(401).send("Unauthorized");
   }
 
@@ -47,10 +43,7 @@ app.post("/webhook", async (req, res) => {
     return res.status(400).send("Invalid payload");
   }
 
-  const variantIds = (payload.variants || []).map(
-    (v) => v.id.toString()
-  );
-
+  const variantIds = (payload.variants || []).map((v) => v.id.toString());
   console.log("📦 Webhook received, sending to /tag-variants:", variantIds);
 
   await fetch(`${BASE_URL}/tag-variants`, {
@@ -71,9 +64,15 @@ app.post("/tag-variants", async (req, res) => {
 
   for (const variantId of variant_ids) {
     try {
+      if (recentlyTagged.has(variantId)) {
+        console.log(`⏳ Skipping ${variantId} – recently tagged`);
+        continue;
+      }
+
+      recentlyTagged.add(variantId);
+      setTimeout(() => recentlyTagged.delete(variantId), 30000); // 30s cooldown
+
       const encodedId = encodeShopifyVariantId(variantId);
-      console.log(`🔍 Requesting variant ${variantId}`);
-      console.log(`🔍 Encoded ID: ${encodedId}`);
 
       const query = `{
         productVariant(id: "${encodedId}") {
@@ -103,6 +102,7 @@ app.post("/tag-variants", async (req, res) => {
 
       const text = await response.text();
       let result;
+
       try {
         result = JSON.parse(text);
       } catch (err) {
@@ -119,7 +119,6 @@ app.post("/tag-variants", async (req, res) => {
       const variant = result?.data?.productVariant;
       if (!variant) {
         console.warn(`⚠️ Variant not found in response for ${variantId}`);
-        console.warn("📭 Full result:", JSON.stringify(result, null, 2));
         continue;
       }
 
@@ -151,8 +150,14 @@ app.post("/tag-variants", async (req, res) => {
         newTag = "None";
       }
 
+      // 🔐 Prevent loops: skip if value is unchanged or empty
       if (newTag === currentTag) {
-        console.log(`✅ ${variantId} already tagged as "${newTag}"`);
+        console.log(`✅ ${variantId} already tagged as "${newTag}" – skipping write`);
+        continue;
+      }
+
+      if (newTag === "None" && !currentTag) {
+        console.log(`✅ ${variantId} has no tag and doesn't need one – skipping write`);
         continue;
       }
 
@@ -189,7 +194,7 @@ app.post("/tag-variants", async (req, res) => {
   res.json({ status: "done", processed: variant_ids.length });
 });
 
-// Debug route for manual variant testing
+// Optional debug route stays here
 app.get("/debug-variant/:id", async (req, res) => {
   try {
     const variantId = req.params.id;
@@ -239,7 +244,6 @@ app.get("/debug-variant/:id", async (req, res) => {
   }
 });
 
-// Start server
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 Variant tagging server running on port ${PORT}`);
