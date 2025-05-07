@@ -10,7 +10,6 @@ const SHOPIFY_WEBHOOK_SECRET = process.env.SHOPIFY_WEBHOOK_SECRET;
 const BASE_URL = process.env.BASE_URL || "http://localhost:3000";
 const delay = (ms) => new Promise((res) => setTimeout(res, ms));
 
-// Raw body needed for HMAC
 app.use("/webhook", bodyParser.raw({ type: "application/json", limit: "5mb" }));
 
 function verifyHmac(req) {
@@ -31,12 +30,10 @@ function verifyHmac(req) {
   return valid;
 }
 
-// Variant ID encoding
 function encodeShopifyVariantId(id) {
   return Buffer.from(`gid://shopify/ProductVariant/${id}`).toString("base64");
 }
 
-// Webhook handler
 app.post("/webhook", async (req, res) => {
   if (!verifyHmac(req)) {
     return res.status(401).send("Unauthorized");
@@ -65,10 +62,8 @@ app.post("/webhook", async (req, res) => {
   res.status(200).send("OK");
 });
 
-// JSON parsing for other routes
 app.use(express.json({ limit: "5mb" }));
 
-// Tagging logic
 app.post("/tag-variants", async (req, res) => {
   const { variant_ids } = req.body;
   const now = new Date();
@@ -77,7 +72,6 @@ app.post("/tag-variants", async (req, res) => {
   for (const variantId of variant_ids) {
     try {
       const encodedId = encodeShopifyVariantId(variantId);
-
       console.log(`🔍 Requesting variant ${variantId}`);
       console.log(`🔍 Encoded ID: ${encodedId}`);
 
@@ -89,10 +83,10 @@ app.post("/tag-variants", async (req, res) => {
           price
           compareAtPrice
           product { createdAt }
-          metafields(namespace: "espresso", first: 10) {
+          espressoMeta: metafields(namespace: "espresso", first: 10) {
             edges { node { key value } }
           }
-          metafields(namespace: "custom", first: 10) {
+          customMeta: metafields(namespace: "custom", first: 10) {
             edges { node { key value } }
           }
         }
@@ -108,7 +102,6 @@ app.post("/tag-variants", async (req, res) => {
       });
 
       const text = await response.text();
-
       let result;
       try {
         result = JSON.parse(text);
@@ -137,10 +130,10 @@ app.post("/tag-variants", async (req, res) => {
 
       const espressoMeta = {};
       const customMeta = {};
-      variant.metafields.espresso.edges.forEach((edge) => {
+      variant.espressoMeta.edges.forEach((edge) => {
         espressoMeta[edge.node.key] = edge.node.value;
       });
-      variant.metafields.custom.edges.forEach((edge) => {
+      variant.customMeta.edges.forEach((edge) => {
         customMeta[edge.node.key] = edge.node.value;
       });
 
@@ -196,12 +189,10 @@ app.post("/tag-variants", async (req, res) => {
   res.json({ status: "done", processed: variant_ids.length });
 });
 
-// 🔍 Debug route for live variant inspection
+// Debug route for manual variant testing
 app.get("/debug-variant/:id", async (req, res) => {
   try {
     const variantId = req.params.id;
-    if (!variantId) return res.status(400).json({ error: "Missing variant ID" });
-
     const encodedId = Buffer.from(`gid://shopify/ProductVariant/${variantId}`).toString("base64");
 
     const query = `{
@@ -212,6 +203,12 @@ app.get("/debug-variant/:id", async (req, res) => {
         price
         compareAtPrice
         product { title createdAt }
+        espressoMeta: metafields(namespace: "espresso", first: 10) {
+          edges { node { key value } }
+        }
+        customMeta: metafields(namespace: "custom", first: 10) {
+          edges { node { key value } }
+        }
       }
     }`;
 
@@ -242,7 +239,7 @@ app.get("/debug-variant/:id", async (req, res) => {
   }
 });
 
-// Launch server
+// Start server
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 Variant tagging server running on port ${PORT}`);
