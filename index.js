@@ -137,7 +137,7 @@ app.post("/tag-variants", async (req, res) => {
       });
 
       const isBestSeller = espressoMeta.best_selling_30_days === "true";
-      const currentTag = customMeta.tag || "";
+      const currentTag = (customMeta.tag || "").trim().toLowerCase();
 
       let newTag = "";
       if (createdAt > productCreated && now - createdAt < msIn45Days) {
@@ -149,7 +149,7 @@ app.post("/tag-variants", async (req, res) => {
       } else {
         newTag = "None";
       }
-
+newTag = newTag.toLowerCase();
       // 🔐 Prevent loops: skip if value is unchanged or empty
       console.log(`📋 Variant ${variantId} — current tag: "${currentTag}", new tag: "${newTag}"`);
       if (newTag === currentTag) {
