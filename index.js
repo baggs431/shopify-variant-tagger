@@ -151,6 +151,7 @@ app.post("/tag-variants", async (req, res) => {
       }
 
       // 🔐 Prevent loops: skip if value is unchanged or empty
+      console.log(`📋 Variant ${variantId} — current tag: "${currentTag}", new tag: "${newTag}"`);
       if (newTag === currentTag) {
         console.log(`✅ ${variantId} already tagged as "${newTag}" – skipping write`);
         continue;
