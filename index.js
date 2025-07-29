@@ -13,49 +13,53 @@ const delay = (ms) => new Promise((res) => setTimeout(res, ms));
 // 🧠 Temporarily stores recently processed variant IDs
 const recentlyTagged = new Set();
 
-app.use("/webhook", bodyParser.raw({ type: "application/json", limit: "5mb" }));
+// 👇 Handle webhook separately with raw body
+const webhookRouter = express.Router();
 
-function verifyHmac(req) {
-  const hmacHeader = req.get("X-Shopify-Hmac-Sha256");
-  const digest = crypto
-    .createHmac("sha256", SHOPIFY_WEBHOOK_SECRET)
-    .update(req.body)
-    .digest("base64");
+webhookRouter.post(
+  "/",
+  bodyParser.raw({ type: "application/json", limit: "5mb" }),
+  async (req, res) => {
+    const hmacHeader = req.get("X-Shopify-Hmac-Sha256");
+    const digest = crypto
+      .createHmac("sha256", SHOPIFY_WEBHOOK_SECRET)
+      .update(req.body)
+      .digest("base64");
 
-  return digest === hmacHeader;
-}
+    if (digest !== hmacHeader) {
+      console.warn("❌ Webhook HMAC validation failed");
+      return res.status(401).send("Unauthorized");
+    }
+
+    let payload;
+    try {
+      payload = JSON.parse(req.body.toString("utf8"));
+    } catch (error) {
+      console.error("❌ Payload parsing failed", error);
+      return res.status(400).send("Invalid payload");
+    }
+
+    const variantIds = (payload.variants || []).map((v) => v.id.toString());
+    console.log("📦 Webhook received, sending to /tag-variants:", variantIds);
+
+    await fetch(`${BASE_URL}/tag-variants`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ variant_ids: variantIds }),
+    });
+
+    res.status(200).send("OK");
+  }
+);
+
+app.use("/webhook", webhookRouter); // mount BEFORE any JSON middleware
+
+// 👇 Only parse JSON *after* webhook route is mounted
+app.use(express.json({ limit: "5mb" }));
 
 function encodeShopifyVariantId(id) {
   return Buffer.from(`gid://shopify/ProductVariant/${id}`).toString("base64");
 }
-
-app.post("/webhook", async (req, res) => {
-  if (!verifyHmac(req)) {
-    console.warn("❌ Webhook HMAC validation failed");
-    return res.status(401).send("Unauthorized");
-  }
-
-  let payload;
-  try {
-    payload = JSON.parse(req.body.toString("utf8"));
-  } catch (error) {
-    console.error("❌ Payload parsing failed", error);
-    return res.status(400).send("Invalid payload");
-  }
-
-  const variantIds = (payload.variants || []).map((v) => v.id.toString());
-  console.log("📦 Webhook received, sending to /tag-variants:", variantIds);
-
-  await fetch(`${BASE_URL}/tag-variants`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ variant_ids: variantIds }),
-  });
-
-  res.status(200).send("OK");
-});
-
-app.use(express.json({ limit: "5mb" }));
 
 app.post("/tag-variants", async (req, res) => {
   const { variant_ids } = req.body;
@@ -149,15 +153,17 @@ app.post("/tag-variants", async (req, res) => {
       } else {
         newTag = "None";
       }
-newTag = newTag.toLowerCase();
-      // 🔐 Prevent loops: skip if value is unchanged or empty
+
+      newTag = newTag.toLowerCase();
+
       console.log(`📋 Variant ${variantId} — current tag: "${currentTag}", new tag: "${newTag}"`);
+
       if (newTag === currentTag) {
         console.log(`✅ ${variantId} already tagged as "${newTag}" – skipping write`);
         continue;
       }
 
-      if (newTag === "None" && !currentTag) {
+      if (newTag === "none" && !currentTag) {
         console.log(`✅ ${variantId} has no tag and doesn't need one – skipping write`);
         continue;
       }
@@ -195,7 +201,7 @@ newTag = newTag.toLowerCase();
   res.json({ status: "done", processed: variant_ids.length });
 });
 
-// Optional debug route stays here
+// 🔍 Optional debug route
 app.get("/debug-variant/:id", async (req, res) => {
   try {
     const variantId = req.params.id;
