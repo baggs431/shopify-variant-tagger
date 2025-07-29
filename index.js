@@ -1,3 +1,33 @@
+async function registerWebhook() {
+  try {
+    const response = await fetch(`https://${SHOPIFY_STORE}/admin/api/2025-01/webhooks.json`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Shopify-Access-Token": ADMIN_API_TOKEN,
+      },
+      body: JSON.stringify({
+        webhook: {
+          topic: "products/update",
+          address: `${BASE_URL}/webhook`,
+          format: "json",
+        },
+      }),
+    });
+
+    const data = await response.json();
+
+    if (response.ok) {
+      console.log("✅ Webhook registration successful:", data.webhook?.id || data);
+    } else {
+      console.warn("⚠️ Webhook registration failed:", data.errors || data);
+    }
+  } catch (error) {
+    console.error("❌ Error registering webhook:", error.message);
+  }
+}
+
+
 import express from "express";
 import fetch from "node-fetch";
 import crypto from "crypto";
@@ -248,4 +278,5 @@ app.get("/debug-variant/:id", async (req, res) => {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`🚀 Variant tagging server running on port ${PORT}`);
+  registerWebhook(); // ⬅️ This does the magic
 });
