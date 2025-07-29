@@ -91,7 +91,7 @@ app.post("/tag-variants", async (req, res) => {
         }
       }`;
 
-      const response = await fetch(`https://${SHOPIFY_STORE}/admin/api/2023-10/graphql.json`, {
+      const response = await fetch(`https://${SHOPIFY_STORE}/admin/api/2025-01/graphql.json`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -176,7 +176,7 @@ newTag = newTag.toLowerCase();
           }
         }`;
 
-      await fetch(`https://${SHOPIFY_STORE}/admin/api/2023-10/graphql.json`, {
+      await fetch(`https://${SHOPIFY_STORE}/admin/api/2025-01/graphql.json`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -218,7 +218,7 @@ app.get("/debug-variant/:id", async (req, res) => {
       }
     }`;
 
-    const response = await fetch(`https://${SHOPIFY_STORE}/admin/api/2023-10/graphql.json`, {
+    const response = await fetch(`https://${SHOPIFY_STORE}/admin/api/2025-01/graphql.json`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
