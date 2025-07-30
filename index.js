@@ -4,16 +4,49 @@ import crypto from "crypto";
 import bodyParser from "body-parser";
 
 const app = express();
-const SHOPIFY_STORE = process.env.SHOPIFY_STORE || "uk-escentual.myshopify.com";
-const ADMIN_API_TOKEN = process.env.ADMIN_API_TOKEN;
+const SHOPIFY_STORE        = process.env.SHOPIFY_STORE        || "uk-escentual.myshopify.com";
+const ADMIN_API_TOKEN      = process.env.ADMIN_API_TOKEN;
 const SHOPIFY_WEBHOOK_SECRET = process.env.SHOPIFY_WEBHOOK_SECRET;
-const BASE_URL = process.env.BASE_URL || "http://localhost:3000";
-const delay = (ms) => new Promise((res) => setTimeout(res, ms));
+const BASE_URL             = process.env.BASE_URL            || "http://localhost:3000";
+const SHOPIFY_API_VERSION  = process.env.SHOPIFY_API_VERSION || "2025-01";
+const delay                = (ms) => new Promise((res) => setTimeout(res, ms));
 
 // 🧠 Temporarily stores recently processed variant IDs
 const recentlyTagged = new Set();
 
-// 👇 Handle webhook separately with raw body
+// ─── 1) AUTO-REGISTER WEBHOOK ─────────────────────────────────────────────────
+async function registerWebhook() {
+  try {
+    const resp = await fetch(
+      `https://${SHOPIFY_STORE}/admin/api/${SHOPIFY_API_VERSION}/webhooks.json`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Shopify-Access-Token": ADMIN_API_TOKEN,
+        },
+        body: JSON.stringify({
+          webhook: {
+            topic: "products/update",
+            address: `${BASE_URL}/webhook`,
+            format: "json",
+          },
+        }),
+      }
+    );
+    const data = await resp.json();
+    if (resp.ok) {
+      console.log("✅ Webhook registered:", data.webhook.id);
+    } else {
+      // “address has already been taken” is fine
+      console.log("⚠️ Webhook register response:", data.errors || data);
+    }
+  } catch (err) {
+    console.error("❌ Webhook registration error:", err.message);
+  }
+}
+
+// ─── 2) WEBHOOK ROUTER (RAW BODY + HMAC) ──────────────────────────────────────
 const webhookRouter = express.Router();
 
 webhookRouter.post(
@@ -52,11 +85,12 @@ webhookRouter.post(
   }
 );
 
-app.use("/webhook", webhookRouter); // mount BEFORE any JSON middleware
+app.use("/webhook", webhookRouter);
 
-// 👇 Only parse JSON *after* webhook route is mounted
+// ─── 3) JSON BODY PARSER FOR EVERYTHING ELSE ──────────────────────────────────
 app.use(express.json({ limit: "5mb" }));
 
+// ─── 4) VARIANT-TAGGING LOGIC ─────────────────────────────────────────────────
 function encodeShopifyVariantId(id) {
   return Buffer.from(`gid://shopify/ProductVariant/${id}`).toString("base64");
 }
@@ -72,19 +106,13 @@ app.post("/tag-variants", async (req, res) => {
         console.log(`⏳ Skipping ${variantId} – recently tagged`);
         continue;
       }
-
       recentlyTagged.add(variantId);
-      setTimeout(() => recentlyTagged.delete(variantId), 30000); // 30s cooldown
+      setTimeout(() => recentlyTagged.delete(variantId), 30000);
 
       const encodedId = encodeShopifyVariantId(variantId);
-
       const query = `{
         productVariant(id: "${encodedId}") {
-          id
-          title
-          createdAt
-          price
-          compareAtPrice
+          id title createdAt price compareAtPrice
           product { createdAt }
           espressoMeta: metafields(namespace: "espresso", first: 10) {
             edges { node { key value } }
@@ -95,53 +123,49 @@ app.post("/tag-variants", async (req, res) => {
         }
       }`;
 
-      const response = await fetch(`https://${SHOPIFY_STORE}/admin/api/2025-01/graphql.json`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Shopify-Access-Token": ADMIN_API_TOKEN,
-        },
-        body: JSON.stringify({ query }),
-      });
+      const response = await fetch(
+        `https://${SHOPIFY_STORE}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Shopify-Access-Token": ADMIN_API_TOKEN,
+          },
+          body: JSON.stringify({ query }),
+        }
+      );
 
       const text = await response.text();
       let result;
-
       try {
         result = JSON.parse(text);
-      } catch (err) {
-        console.error(`❌ Failed to parse response for ${variantId}:`, err.message);
-        console.error("Raw response:", text);
+      } catch {
+        console.error(`❌ Parse failed for ${variantId}`, text);
         continue;
       }
-
       if (result.errors) {
-        console.warn(`⚠️ Shopify returned GraphQL errors for ${variantId}:`, result.errors);
+        console.warn(`⚠️ GraphQL errors for ${variantId}`, result.errors);
         continue;
       }
 
-      const variant = result?.data?.productVariant;
-      if (!variant) {
-        console.warn(`⚠️ Variant not found in response for ${variantId}`);
+      const v = result.data.productVariant;
+      if (!v) {
+        console.warn(`⚠️ Variant missing for ${variantId}`);
         continue;
       }
 
-      const createdAt = new Date(variant.createdAt);
-      const productCreated = new Date(variant.product.createdAt);
-      const price = parseFloat(variant.price);
-      const compareAt = parseFloat(variant.compareAtPrice || "0");
+      const createdAt     = new Date(v.createdAt);
+      const productCreated = new Date(v.product.createdAt);
+      const price         = parseFloat(v.price);
+      const compareAt     = parseFloat(v.compareAtPrice || "0");
 
       const espressoMeta = {};
-      const customMeta = {};
-      variant.espressoMeta.edges.forEach((edge) => {
-        espressoMeta[edge.node.key] = edge.node.value;
-      });
-      variant.customMeta.edges.forEach((edge) => {
-        customMeta[edge.node.key] = edge.node.value;
-      });
+      const customMeta   = {};
+      v.espressoMeta.edges.forEach((e) => espressoMeta[e.node.key] = e.node.value);
+      v.customMeta.edges.forEach((e)   => customMeta[e.node.key]   = e.node.value);
 
       const isBestSeller = espressoMeta.best_selling_30_days === "true";
-      const currentTag = (customMeta.tag || "").trim().toLowerCase();
+      const currentTag   = (customMeta.tag || "").trim().toLowerCase();
 
       let newTag = "";
       if (createdAt > productCreated && now - createdAt < msIn45Days) {
@@ -153,18 +177,11 @@ app.post("/tag-variants", async (req, res) => {
       } else {
         newTag = "None";
       }
-
       newTag = newTag.toLowerCase();
 
-      console.log(`📋 Variant ${variantId} — current tag: "${currentTag}", new tag: "${newTag}"`);
-
-      if (newTag === currentTag) {
-        console.log(`✅ ${variantId} already tagged as "${newTag}" – skipping write`);
-        continue;
-      }
-
-      if (newTag === "none" && !currentTag) {
-        console.log(`✅ ${variantId} has no tag and doesn't need one – skipping write`);
+      console.log(`📋 ${variantId} — current: "${currentTag}", new: "${newTag}"`);
+      if (newTag === currentTag || (newTag === "none" && !currentTag)) {
+        console.log(`✅ No change for ${variantId}`);
         continue;
       }
 
@@ -182,38 +199,37 @@ app.post("/tag-variants", async (req, res) => {
           }
         }`;
 
-      await fetch(`https://${SHOPIFY_STORE}/admin/api/2025-01/graphql.json`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Shopify-Access-Token": ADMIN_API_TOKEN,
-        },
-        body: JSON.stringify({ query: mutation }),
-      });
+      await fetch(
+        `https://${SHOPIFY_STORE}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Shopify-Access-Token": ADMIN_API_TOKEN,
+          },
+          body: JSON.stringify({ query: mutation }),
+        }
+      );
 
       console.log(`🏷️ Tagged ${variantId} as "${newTag}"`);
       await delay(1000);
     } catch (err) {
-      console.error(`❌ Error tagging ${variantId}:`, err.message);
+      console.error(`❌ Error on ${variantId}:`, err.message);
     }
   }
 
   res.json({ status: "done", processed: variant_ids.length });
 });
 
-// 🔍 Optional debug route
+// ─── 5) OPTIONAL DEBUG ROUTE ─────────────────────────────────────────────────
 app.get("/debug-variant/:id", async (req, res) => {
   try {
-    const variantId = req.params.id;
-    const encodedId = Buffer.from(`gid://shopify/ProductVariant/${variantId}`).toString("base64");
+    const id = req.params.id;
+    const encoded = Buffer.from(`gid://shopify/ProductVariant/${id}`).toString("base64");
 
     const query = `{
-      productVariant(id: "${encodedId}") {
-        id
-        title
-        createdAt
-        price
-        compareAtPrice
+      productVariant(id: "${encoded}") {
+        id title createdAt price compareAtPrice
         product { title createdAt }
         espressoMeta: metafields(namespace: "espresso", first: 10) {
           edges { node { key value } }
@@ -224,34 +240,29 @@ app.get("/debug-variant/:id", async (req, res) => {
       }
     }`;
 
-    const response = await fetch(`https://${SHOPIFY_STORE}/admin/api/2025-01/graphql.json`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "X-Shopify-Access-Token": ADMIN_API_TOKEN,
-      },
-      body: JSON.stringify({ query }),
-    });
-
-    const text = await response.text();
+    const resp = await fetch(
+      `https://${SHOPIFY_STORE}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Shopify-Access-Token": ADMIN_API_TOKEN,
+        },
+        body: JSON.stringify({ query }),
+      }
+    );
+    const text = await resp.text();
     let result;
-
-    try {
-      result = JSON.parse(text);
-    } catch {
-      return res.status(500).json({
-        error: "Invalid JSON response from Shopify",
-        raw: text,
-      });
-    }
-
-    res.json({ success: true, variantId, result });
+    try { result = JSON.parse(text); } catch { return res.status(500).json({ error: text }); }
+    res.json({ success: true, id, result });
   } catch (err) {
-    res.status(500).json({ error: "Server error", detail: err.message });
+    res.status(500).json({ error: err.message });
   }
 });
 
+// ─── 6) START SERVER + REGISTER WEBHOOK ───────────────────────────────────────
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`🚀 Variant tagging server running on port ${PORT}`);
+  console.log(`🚀 Server listening on port ${PORT}`);
+  registerWebhook();
 });
