@@ -11,20 +11,45 @@ const BASE_URL             = process.env.BASE_URL            || "http://localhos
 const SHOPIFY_API_VERSION  = process.env.SHOPIFY_API_VERSION || "2025-01";
 const delay                = (ms) => new Promise((res) => setTimeout(res, ms));
 
-// 🧠 Temporarily stores recently processed variant IDs
-const recentlyTagged = new Set();
+// 🧠 Helper: query Shopify Admin API
+async function shopifyRequest(path, opts) {
+  const url = `https://${SHOPIFY_STORE}/admin/api/${SHOPIFY_API_VERSION}${path}`;
+  return fetch(url, {
+    headers: {
+      "Content-Type": "application/json",
+      "X-Shopify-Access-Token": ADMIN_API_TOKEN,
+    },
+    ...opts,
+  });
+}
 
-// ─── 1) AUTO-REGISTER WEBHOOK ─────────────────────────────────────────────────
-async function registerWebhook() {
+// ─── AUTO-RECONCILE WEBHOOK ─────────────────────────────────────────────────────
+// Ensures exactly one products/update → ${BASE_URL}/webhook exists.
+async function reconcileWebhook() {
   try {
-    const resp = await fetch(
-      `https://${SHOPIFY_STORE}/admin/api/${SHOPIFY_API_VERSION}/webhooks.json`,
-      {
+    // 1) List existing
+    const listRes = await shopifyRequest("/webhooks.json?limit=250");
+    const listData = await listRes.json();
+    const existing = (listData.webhooks || []).filter(
+      (w) =>
+        w.topic === "products/update" &&
+        w.address === `${BASE_URL}/webhook`
+    );
+
+    // 2) Delete any duplicates beyond one
+    if (existing.length > 1) {
+      for (let i = 1; i < existing.length; i++) {
+        await shopifyRequest(`/webhooks/${existing[i].id}.json`, {
+          method: "DELETE",
+        });
+        console.log(`🗑️ Deleted duplicate webhook #${existing[i].id}`);
+      }
+    }
+
+    // 3) Create if none exist
+    if (existing.length === 0) {
+      const createRes = await shopifyRequest("/webhooks.json", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Shopify-Access-Token": ADMIN_API_TOKEN,
-        },
         body: JSON.stringify({
           webhook: {
             topic: "products/update",
@@ -32,23 +57,23 @@ async function registerWebhook() {
             format: "json",
           },
         }),
+      });
+      const createData = await createRes.json();
+      if (createRes.ok) {
+        console.log("✅ Webhook created:", createData.webhook.id);
+      } else {
+        console.warn("⚠️ Failed to create webhook:", createData.errors || createData);
       }
-    );
-    const data = await resp.json();
-    if (resp.ok) {
-      console.log("✅ Webhook registered:", data.webhook.id);
     } else {
-      // “address has already been taken” is fine
-      console.log("⚠️ Webhook register response:", data.errors || data);
+      console.log("✅ Webhook already registered:", existing[0].id);
     }
   } catch (err) {
-    console.error("❌ Webhook registration error:", err.message);
+    console.error("❌ Webhook reconcile error:", err.message);
   }
 }
 
-// ─── 2) WEBHOOK ROUTER (RAW BODY + HMAC) ──────────────────────────────────────
+// ─── WEBHOOK HANDLER (RAW + HMAC) ───────────────────────────────────────────────
 const webhookRouter = express.Router();
-
 webhookRouter.post(
   "/",
   bodyParser.raw({ type: "application/json", limit: "5mb" }),
@@ -58,7 +83,6 @@ webhookRouter.post(
       .createHmac("sha256", SHOPIFY_WEBHOOK_SECRET)
       .update(req.body)
       .digest("base64");
-
     if (digest !== hmacHeader) {
       console.warn("❌ Webhook HMAC validation failed");
       return res.status(401).send("Unauthorized");
@@ -67,13 +91,13 @@ webhookRouter.post(
     let payload;
     try {
       payload = JSON.parse(req.body.toString("utf8"));
-    } catch (error) {
-      console.error("❌ Payload parsing failed", error);
+    } catch (err) {
+      console.error("❌ Payload parsing failed", err);
       return res.status(400).send("Invalid payload");
     }
 
     const variantIds = (payload.variants || []).map((v) => v.id.toString());
-    console.log("📦 Webhook received, sending to /tag-variants:", variantIds);
+    console.log("📦 Webhook received:", variantIds);
 
     await fetch(`${BASE_URL}/tag-variants`, {
       method: "POST",
@@ -84,185 +108,116 @@ webhookRouter.post(
     res.status(200).send("OK");
   }
 );
-
 app.use("/webhook", webhookRouter);
+app.use(express.json({ limit: "5mb" })); // everything else
 
-// ─── 3) JSON BODY PARSER FOR EVERYTHING ELSE ──────────────────────────────────
-app.use(express.json({ limit: "5mb" }));
-
-// ─── 4) VARIANT-TAGGING LOGIC ─────────────────────────────────────────────────
+// ─── VARIANT-TAGGING LOGIC (UNCHANGED) ─────────────────────────────────────────
 function encodeShopifyVariantId(id) {
   return Buffer.from(`gid://shopify/ProductVariant/${id}`).toString("base64");
 }
 
+const recentlyTagged = new Set();
+
 app.post("/tag-variants", async (req, res) => {
   const { variant_ids } = req.body;
-  const now = new Date();
-  const msIn45Days = 45 * 24 * 60 * 60 * 1000;
+  const now = Date.now();
+  const ms45d = 45 * 24 * 60 * 60 * 1000;
 
-  for (const variantId of variant_ids) {
+  for (const id of variant_ids) {
     try {
-      if (recentlyTagged.has(variantId)) {
-        console.log(`⏳ Skipping ${variantId} – recently tagged`);
+      if (recentlyTagged.has(id)) {
+        console.log(`⏳ Skipping ${id} – cooldown`);
         continue;
       }
-      recentlyTagged.add(variantId);
-      setTimeout(() => recentlyTagged.delete(variantId), 30000);
+      recentlyTagged.add(id);
+      setTimeout(() => recentlyTagged.delete(id), 30_000);
 
-      const encodedId = encodeShopifyVariantId(variantId);
-      const query = `{
-        productVariant(id: "${encodedId}") {
-          id title createdAt price compareAtPrice
-          product { createdAt }
-          espressoMeta: metafields(namespace: "espresso", first: 10) {
-            edges { node { key value } }
-          }
-          customMeta: metafields(namespace: "custom", first: 10) {
-            edges { node { key value } }
-          }
+      const gid = encodeShopifyVariantId(id);
+      const q = `{
+        productVariant(id:"${gid}") {
+          createdAt price compareAtPrice product{createdAt}
+          espressoMeta:metafields(namespace:"espresso",first:10){edges{node{key value}}}
+          customMeta:metafields(namespace:"custom",first:10){edges{node{key value}}}
         }
       }`;
+      const resp = await shopifyRequest("/graphql.json", {
+        method: "POST",
+        body: JSON.stringify({ query: q }),
+      });
+      const text = await resp.text();
+      let data;
+      try { data = JSON.parse(text); } catch { console.error("❌ Bad JSON", text); continue; }
+      if (data.errors) { console.warn("⚠️ GQL errors", data.errors); continue; }
+      const v = data.data.productVariant;
+      if (!v) { console.warn("⚠️ No variant", id); continue; }
 
-      const response = await fetch(
-        `https://${SHOPIFY_STORE}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "X-Shopify-Access-Token": ADMIN_API_TOKEN,
-          },
-          body: JSON.stringify({ query }),
-        }
-      );
+      const createdAt = new Date(v.createdAt).getTime();
+      const prodCreated = new Date(v.product.createdAt).getTime();
+      const price = parseFloat(v.price);
+      const cmp   = parseFloat(v.compareAtPrice||"0");
+      const esm   = Object.fromEntries(v.espressoMeta.edges.map(e=>[e.node.key,e.node.value]));
+      const csm   = Object.fromEntries(v.customMeta.edges.map(e=>[e.node.key,e.node.value]));
 
-      const text = await response.text();
-      let result;
-      try {
-        result = JSON.parse(text);
-      } catch {
-        console.error(`❌ Parse failed for ${variantId}`, text);
-        continue;
-      }
-      if (result.errors) {
-        console.warn(`⚠️ GraphQL errors for ${variantId}`, result.errors);
-        continue;
-      }
+      const isBest = esm.best_selling_30_days==="true";
+      const curTag = (csm.tag||"").trim().toLowerCase();
 
-      const v = result.data.productVariant;
-      if (!v) {
-        console.warn(`⚠️ Variant missing for ${variantId}`);
-        continue;
-      }
+      let newTag = "none";
+      if (createdAt>prodCreated && now-createdAt<ms45d) newTag="new";
+      else if (cmp>price) newTag="offer";
+      else if (isBest) newTag="hot";
 
-      const createdAt     = new Date(v.createdAt);
-      const productCreated = new Date(v.product.createdAt);
-      const price         = parseFloat(v.price);
-      const compareAt     = parseFloat(v.compareAtPrice || "0");
-
-      const espressoMeta = {};
-      const customMeta   = {};
-      v.espressoMeta.edges.forEach((e) => espressoMeta[e.node.key] = e.node.value);
-      v.customMeta.edges.forEach((e)   => customMeta[e.node.key]   = e.node.value);
-
-      const isBestSeller = espressoMeta.best_selling_30_days === "true";
-      const currentTag   = (customMeta.tag || "").trim().toLowerCase();
-
-      let newTag = "";
-      if (createdAt > productCreated && now - createdAt < msIn45Days) {
-        newTag = "New";
-      } else if (compareAt > price) {
-        newTag = "Offer";
-      } else if (isBestSeller) {
-        newTag = "Hot";
-      } else {
-        newTag = "None";
-      }
-      newTag = newTag.toLowerCase();
-
-      console.log(`📋 ${variantId} — current: "${currentTag}", new: "${newTag}"`);
-      if (newTag === currentTag || (newTag === "none" && !currentTag)) {
-        console.log(`✅ No change for ${variantId}`);
+      if (newTag===curTag || (newTag==="none" && !curTag)) {
+        console.log(`✅ ${id} no change (${curTag})`);
         continue;
       }
 
-      const mutation = `
+      const m = `
         mutation {
-          metafieldsSet(metafields: [{
-            ownerId: "${encodedId}",
-            namespace: "custom",
-            key: "tag",
-            type: "single_line_text_field",
-            value: "${newTag}"
-          }]) {
-            metafields { key value }
-            userErrors { field message }
-          }
+          metafieldsSet(metafields:[{
+            ownerId:"${gid}",
+            namespace:"custom",key:"tag",
+            type:"single_line_text_field",value:"${newTag}"
+          }]) { userErrors{field message} }
         }`;
-
-      await fetch(
-        `https://${SHOPIFY_STORE}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "X-Shopify-Access-Token": ADMIN_API_TOKEN,
-          },
-          body: JSON.stringify({ query: mutation }),
-        }
-      );
-
-      console.log(`🏷️ Tagged ${variantId} as "${newTag}"`);
+      await shopifyRequest("/graphql.json", {
+        method: "POST",
+        body: JSON.stringify({ query: m }),
+      });
+      console.log(`🏷️ Tagged ${id} as "${newTag}"`);
       await delay(1000);
+
     } catch (err) {
-      console.error(`❌ Error on ${variantId}:`, err.message);
+      console.error(`❌ Error on ${id}:`, err.message);
     }
   }
 
-  res.json({ status: "done", processed: variant_ids.length });
+  res.json({ status:"done", processed:variant_ids.length });
 });
 
-// ─── 5) OPTIONAL DEBUG ROUTE ─────────────────────────────────────────────────
+// ─── DEBUG ROUTE (optional) ───────────────────────────────────────────────────
 app.get("/debug-variant/:id", async (req, res) => {
-  try {
-    const id = req.params.id;
-    const encoded = Buffer.from(`gid://shopify/ProductVariant/${id}`).toString("base64");
-
-    const query = `{
-      productVariant(id: "${encoded}") {
-        id title createdAt price compareAtPrice
-        product { title createdAt }
-        espressoMeta: metafields(namespace: "espresso", first: 10) {
-          edges { node { key value } }
-        }
-        customMeta: metafields(namespace: "custom", first: 10) {
-          edges { node { key value } }
-        }
-      }
-    }`;
-
-    const resp = await fetch(
-      `https://${SHOPIFY_STORE}/admin/api/${SHOPIFY_API_VERSION}/graphql.json`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Shopify-Access-Token": ADMIN_API_TOKEN,
-        },
-        body: JSON.stringify({ query }),
-      }
-    );
-    const text = await resp.text();
-    let result;
-    try { result = JSON.parse(text); } catch { return res.status(500).json({ error: text }); }
-    res.json({ success: true, id, result });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
+  const id = req.params.id;
+  const gid = encodeShopifyVariantId(id);
+  const q = `{
+    productVariant(id:"${gid}") {
+      title createdAt price compareAtPrice
+      espressoMeta:metafields(namespace:"espresso",first:10){edges{node{key value}}}
+      customMeta:metafields(namespace:"custom",first:10){edges{node{key value}}}
+    }
+  }`;
+  const resp = await shopifyRequest("/graphql.json", {
+    method: "POST",
+    body: JSON.stringify({ query: q }),
+  });
+  const text = await resp.text();
+  let data;
+  try { data = JSON.parse(text); } catch { return res.status(500).send(text); }
+  res.json({ success:true, id, data });
 });
 
-// ─── 6) START SERVER + REGISTER WEBHOOK ───────────────────────────────────────
-const PORT = process.env.PORT || 3000;
+// ─── START + RECONCILE ─────────────────────────────────────────────────────────
+const PORT = process.env.PORT||3000;
 app.listen(PORT, () => {
-  console.log(`🚀 Server listening on port ${PORT}`);
-  registerWebhook();
+  console.log(`🚀 Listening on port ${PORT}`);
+  reconcileWebhook();
 });
