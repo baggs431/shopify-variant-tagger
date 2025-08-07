@@ -94,7 +94,7 @@ app.post(
 // JSON parser for other routes
 app.use(express.json({ limit: "5mb" }));
 
-// Variant-tagging logic remains unchanged
+// Variant-tagging logic with fixed skip condition and debug logging
 function encodeShopifyVariantId(id) {
   return Buffer.from(`gid://shopify/ProductVariant/${id}`).toString("base64");
 }
@@ -109,13 +109,7 @@ app.post("/tag-variants", async (req, res) => {
       recentlyTagged.add(id);
       setTimeout(() => recentlyTagged.delete(id), 30000);
       const gid = encodeShopifyVariantId(id);
-      const query = `{
-        productVariant(id:"${gid}") {
-          createdAt price compareAtPrice product{createdAt}
-          espressoMeta:metafields(namespace:"espresso",first:10){edges{node{key value}}}
-          customMeta:metafields(namespace:"custom",first:10){edges{node{key value}}}
-        }
-      }`;
+      const query = `{ productVariant(id: "${gid}") { createdAt price compareAtPrice product { createdAt } espressoMeta: metafields(namespace: "espresso", first: 10) { edges { node { key value } } } customMeta: metafields(namespace: "custom", first: 10) { edges { node { key value } } } } }`;
       const resp = await shopifyRequest("/graphql.json", { method: "POST", body: JSON.stringify({ query }) });
       const text = await resp.text();
       let data;
@@ -125,21 +119,32 @@ app.post("/tag-variants", async (req, res) => {
       if (!v) { console.warn(`⚠️ No variant ${id}`); continue; }
       const createdAt = new Date(v.createdAt).getTime();
       const prodCreated = new Date(v.product.createdAt).getTime();
-      const price = parseFloat(v.price), cmp = parseFloat(v.compareAtPrice||"0");
-      const esm = Object.fromEntries(v.espressoMeta.edges.map(e=>[e.node.key,e.node.value]));
-      const csm = Object.fromEntries(v.customMeta.edges.map(e=>[e.node.key,e.node.value]));
-      const isBest = esm.best_selling_30_days==="true";
-      const curTag = (csm.tag||"").trim().toLowerCase();
+      const price = parseFloat(v.price), cmp = parseFloat(v.compareAtPrice || "0");
+      const esm = Object.fromEntries(v.espressoMeta.edges.map(e => [e.node.key, e.node.value]));
+      const csm = Object.fromEntries(v.customMeta.edges.map(e => [e.node.key, e.node.value]));
+      const isBest = esm.best_selling_30_days === "true";
+      const curTag = (csm.tag || "").trim().toLowerCase();
       let newTag = "none";
-      if (createdAt>prodCreated && now-createdAt<ms45d) newTag="new";
-      else if (cmp>price) newTag="offer";
-      else if (isBest) newTag="hot";
-      if (newTag===curTag || (newTag==="none" && !curTag)) { console.log(`✅ ${id} unchanged`); continue; }
-      const mutation = `mutation{metafieldsSet(metafields:[{ownerId:"${gid}",namespace:"custom",key:"tag",type:"single_line_text_field",value:"${newTag}"}]){userErrors{field message}}}`;
+      if (createdAt > prodCreated && now - createdAt < ms45d) newTag = "new";
+      else if (cmp > price) newTag = "offer";
+      else if (isBest) newTag = "hot";
+
+      // debug logging for comparison
+      console.log(`🔍 ${id}: curTag="${curTag}", newTag="${newTag}"`);
+
+      // only skip when the tag really hasn’t changed
+      if (newTag === curTag) {
+        console.log(`✅ ${id} unchanged`);
+        continue;
+      }
+
+      const mutation = `mutation { metafieldsSet(metafields: [{ ownerId: "${gid}", namespace: "custom", key: "tag", type: "single_line_text_field", value: "${newTag}" }]) { userErrors { field message } } }`;
       await shopifyRequest("/graphql.json", { method: "POST", body: JSON.stringify({ query: mutation }) });
       console.log(`🏷️ Tagged ${id} as ${newTag}`);
       await delay(1000);
-    } catch (err) { console.error(`❌ Error on ${id}:`, err.message); }
+    } catch (err) {
+      console.error(`❌ Error on ${id}:`, err.message);
+    }
   }
   res.json({ status: "done", processed: variant_ids.length });
 });
@@ -148,7 +153,7 @@ app.post("/tag-variants", async (req, res) => {
 app.get("/debug-variant/:id", async (req, res) => {
   const id = req.params.id;
   const gid = encodeShopifyVariantId(id);
-  const query = `{productVariant(id:"${gid}"){title createdAt price compareAtPrice espressoMeta:metafields(namespace:"espresso",first:10){edges{node{key value}}} customMeta:metafields(namespace:"custom",first:10){edges{node{key value}}}}}`;
+  const query = `{ productVariant(id: "${gid}") { title createdAt price compareAtPrice espressoMeta: metafields(namespace: "espresso", first: 10) { edges { node { key value } } } customMeta: metafields(namespace: "custom", first: 10) { edges { node { key value } } } } }`;
   const resp = await shopifyRequest("/graphql.json", { method: "POST", body: JSON.stringify({ query }) });
   const text = await resp.text();
   let data;
